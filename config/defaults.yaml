@@ -1,0 +1,57 @@
+# config/defaults.yaml
+#
+# Single source of truth for every parameter in Intercepterp.
+# All angular and rate values in this file are in DEGREES (per the convention
+# that degrees appear only in config and printed output). The code converts
+# them to radians at load time inside InterceptEnv. All speeds in m/s, all
+# distances in m, all times in s.
+#
+# The blocks "physics", "init", "sensor", "reward", "training" and "curriculum"
+# reproduce spec section 7 verbatim. The "intruder" block holds two values that
+# the spec states in section 4.3 (evasive turn rate 15 deg/s, sinusoidal period
+# ~8 s) but did not list in the section 7 YAML. They live here rather than being
+# hardcoded in intruder.py, to keep a single source of truth.
+
+physics:
+  intruder_speed:    50.0      # m/s
+  interceptor_speed: 78.0      # m/s
+  psi_dot_max:       45.0      # deg/s, interceptor max turn rate
+  blast_radius:      5.0       # m
+  fov_half_angle:    30.0      # deg
+  dt:                0.05      # s
+  episode_timeout:   30.0      # s
+
+intruder:
+  psi_dot_max:       15.0      # deg/s, max evasive turn rate (spec 4.3)
+  sin_period:        8.0       # s, stage-2 sinusoidal heading period (spec 4.3)
+
+init:
+  range_mean:        1000.0    # m
+  range_std:         100.0     # m
+  bearing_offset_max: 5.0      # deg
+
+sensor:
+  bearing_noise_std: 0.5       # deg
+  range_noise_frac:  0.05      # fraction of true range
+
+reward:
+  bearing_penalty:   0.1       # alpha in r_step = -alpha * |theta|
+  success:           100.0
+  fov_loss:         -100.0
+  timeout:          -50.0
+
+training:
+  total_timesteps:   5_000_000
+  n_envs:            8
+  n_steps:           2048
+  batch_size:        256
+  n_epochs:          10
+  learning_rate:     3.0e-4
+  clip_range:        0.2
+  lstm_hidden_size:  256
+  lstm_n_layers:     1
+
+curriculum:
+  window_size:       100
+  patience:          500
+  thresholds:        [0.70, 0.65, null]

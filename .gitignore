@@ -1,0 +1,20 @@
+# Run outputs (models, tensorboard logs, eval JSON) are never committed.
+runs/
+
+# Python bytecode and caches.
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Editor and OS cruft.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code local tooling config (session-specific permissions).
+.claude/

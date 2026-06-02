@@ -1,0 +1,30 @@
+┌─────────────────────────────────────────────────────┐
+│                  SIMULATION LAYER                    │
+│  Intruder kinematics (Dubins, constant heading)      │
+│  Interceptor kinematics (Dubins, turn-rate control)  │
+│  Truth state: [r, θ, φ_self, φ_target]              │
+└──────────────┬──────────────────────────────────────┘
+               │ truth state
+               ▼
+┌─────────────────────────────────────────────────────┐
+│                  SENSOR MODEL                        │
+│  obs = [θ + N(0,σ_θ), r·(1+N(0,0.05)), φ_self]    │
+│  Bearing noise: σ_θ = 0.5°                          │
+│  Range noise: 5% of true range                       │
+│  FOV check: |θ| < FOV/2, else → episode fail        │
+└──────────────┬──────────────────────────────────────┘
+               │ noisy obs (3D vector)
+               ▼
+┌─────────────────────────────────────────────────────┐
+│              RL POLICY (PPO + LSTM)                  │
+│  Input:  observation history via LSTM hidden state   │
+│  Output: turn rate command ψ̇ ∈ [-ψ̇_max, ψ̇_max]   │
+└──────────────┬──────────────────────────────────────┘
+               │ turn rate
+               ▼
+┌─────────────────────────────────────────────────────┐
+│           TERMINATION / REWARD MODULE                │
+│  Detonation: r < blast_radius → success             │
+│  FOV loss: |θ| > FOV/2 → fail                       │
+│  Timeout: t > t_max → fail                           │
+└─────────────────────────────────────────────────────┘

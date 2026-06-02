@@ -1,0 +1,3 @@
+# Intercepterp
+
+Intercepterp is a 2D counter-UAS reinforcement learning environment where a fixed-wing interceptor learns to destroy a Shahed-136 class intruder from a noisy bearing and range alone, replicating the output of a monocular camera in a GPS-denied scenario. A RecurrentPPO policy (PPO with an LSTM) is trained through a three-stage curriculum that escalates the intruder from straight flight to sinusoidal weaving to reactive evasion. The plant, sensor model, and policy are kept as isolated modules so each can later be replaced by a Simulink co-simulation block, a YOLO range estimator, or an exported ONNX policy without changing the reward, curriculum, or training code.
