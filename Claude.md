@@ -173,6 +173,12 @@ Append a new entry after every Claude Code session.
   add ONNX export for the Simulink policy slot (spec section 9); consider adding
   bearing-rate (index 3) only if the LSTM cannot infer it from history.
 
+## 2026-06-02
+- Added output.base_dir to config and made training output paths Kaggle-aware.
+- Added device selection prints and GPU name logging in training entry point.
+- Added requirements.txt for Kaggle installation.
+- Tests: python -m pytest tests/test_env.py
+
 ---
 
 ## Physics constants (quick reference)

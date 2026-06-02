@@ -24,8 +24,10 @@ if str(_ROOT) not in sys.path:
 
 import argparse
 import datetime
+import os
 import shutil
 
+import torch
 import yaml
 from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.monitor import Monitor
@@ -34,6 +36,9 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 from envs.intercept_env import ActionConfig, InterceptEnv
 from training.callbacks import build_callbacks
 from training.curriculum import CurriculumScheduler
+
+ON_KAGGLE = os.path.exists("/kaggle/working")
+BASE_DIR = "/kaggle/working/runs" if ON_KAGGLE else "runs"
 
 
 def load_config(path: str | pathlib.Path) -> dict:
@@ -82,6 +87,7 @@ def train(args: argparse.Namespace) -> pathlib.Path:
     config = load_config(args.config)
     tcfg = config["training"]
     ccfg = config["curriculum"]
+    output_cfg = config.get("output", {})
 
     # Resolve overridable hyperparameters.
     total_timesteps = args.timesteps or int(tcfg["total_timesteps"])
@@ -92,7 +98,13 @@ def train(args: argparse.Namespace) -> pathlib.Path:
         run_dir = pathlib.Path(args.run_dir)
     else:
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = _ROOT / "runs" / stamp
+        if ON_KAGGLE:
+            base_dir = pathlib.Path(BASE_DIR)
+        else:
+            base_dir = pathlib.Path(output_cfg.get("base_dir", BASE_DIR))
+        if not base_dir.is_absolute():
+            base_dir = _ROOT / base_dir
+        run_dir = base_dir / stamp
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Snapshot the exact config used (single source of truth for the run).
@@ -101,7 +113,11 @@ def train(args: argparse.Namespace) -> pathlib.Path:
     print(f"[train] run_dir   = {run_dir}")
     print(f"[train] timesteps = {total_timesteps}")
     print(f"[train] n_envs    = {n_envs}  (subproc={args.subproc})")
-    print(f"[train] device    = {args.device}")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Training on device: {device}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
 
     # Environments.
     train_env = build_vec_env(config, n_envs, args.stage, args.seed, args.subproc)
@@ -110,6 +126,7 @@ def train(args: argparse.Namespace) -> pathlib.Path:
     # Curriculum + callbacks.
     scheduler = CurriculumScheduler(
         thresholds=ccfg["thresholds"],
+        min_success_rate=ccfg.get("min_success_rate", 0.70),
         window_size=int(ccfg["window_size"]),
         patience=int(ccfg["patience"]),
     )
@@ -140,7 +157,7 @@ def train(args: argparse.Namespace) -> pathlib.Path:
         policy_kwargs=policy_kwargs,
         tensorboard_log=str(run_dir / "tensorboard"),
         seed=args.seed,
-        device=args.device,
+        device=device,
         verbose=1,
     )
 
@@ -154,7 +171,10 @@ def train(args: argparse.Namespace) -> pathlib.Path:
         train_env.close()
         eval_env.close()
 
-    print(f"[train] done. evaluate with:\n"
+        best_path = run_dir / "best_model.zip"
+        print(f"[train] best model path: {best_path}")
+
+        print(f"[train] done. evaluate with:\n"
           f"  python eval/eval.py --model {run_dir / 'best_model.zip'} --n-eps 100")
     return run_dir
 
@@ -170,7 +190,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--stage", type=int, default=1, help="initial curriculum stage")
     p.add_argument("--run-dir", default=None,
                    help="explicit run directory (default runs/<timestamp>)")
-    p.add_argument("--device", default="cpu", help="torch device (cpu/cuda)")
     p.add_argument("--eval-freq", type=int, default=50_000,
                    help="timesteps between evaluations (converted to per-env calls)")
     p.add_argument("--eval-episodes", type=int, default=50)

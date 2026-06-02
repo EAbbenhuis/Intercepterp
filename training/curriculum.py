@@ -1,7 +1,8 @@
 """Curriculum scheduler (spec section 4.7).
 
 Advances the intruder difficulty stage when EITHER condition holds, evaluated
-over the most recent window of episodes:
+over the most recent window of episodes and only if the intercept rate meets
+the minimum success rate:
   (a) rolling intercept rate exceeds this stage's threshold, or
   (b) the rolling intercept rate has not set a new best for `patience` episodes
       (a plateau fallback so a stuck agent still progresses).
@@ -24,6 +25,7 @@ class CurriculumScheduler:
     def __init__(
         self,
         thresholds: list[float | None] = (0.70, 0.65, None),
+        min_success_rate: float | None = 0.70,
         window_size: int = 100,
         patience: int = 500,
     ) -> None:
@@ -32,10 +34,15 @@ class CurriculumScheduler:
             thresholds: per-stage intercept-rate threshold. None marks the final
                 stage (never advances on condition (a)). Length defines the
                 number of stages; stages are numbered 1..N.
+            min_success_rate: minimum rolling intercept rate required before
+                any stage advance is allowed.
             window_size: number of recent episodes in the rolling window.
             patience: episodes without a new best rolling rate before advancing.
         """
         self.thresholds = list(thresholds)
+        self.min_success_rate = (
+            None if min_success_rate is None else float(min_success_rate)
+        )
         self.stages = list(range(1, len(self.thresholds) + 1))
         self.window_size = int(window_size)
         self.patience = int(patience)
@@ -89,6 +96,9 @@ class CurriculumScheduler:
         threshold = self.thresholds[self._stage_idx]
         meets_threshold = threshold is not None and rate > threshold
         plateaued = self._since_improve >= self.patience
+
+        if self.min_success_rate is not None and rate < self.min_success_rate:
+            return False
 
         if meets_threshold or plateaued:
             self._advance()
