@@ -135,6 +135,44 @@ Append a new entry after every Claude Code session.
 - Known issues or next steps
 ```
 
+## 2026-06-02
+- Built the full repository from scratch per INTERCEPTERP_SPEC.md: config/defaults.yaml,
+  the env stack (base_env, agents/intruder, agents/interceptor, sensor, intercept_env),
+  a 15-case pytest suite, training (curriculum, callbacks, train), evaluation
+  (metrics, eval), visualisation (replay, dashboard), README, and .gitignore.
+- Validation: env passes SB3 check_env with no warnings; all 15 tests pass; a short
+  RecurrentPPO smoke run trained, evaluated (wrote eval_results.json), and replayed
+  (saved a GIF) end to end. Full 5e6-step training was not run here.
+- Decisions and spec ambiguities (all flagged in code comments):
+  - Action scaling: env keeps action_space at [-1, 1] (hard rule) and scales to
+    physical rad/s inside Interceptor.apply_action (clip to [-1, 1], then multiply by
+    psi_dot_max). This reconciles the [-1, 1] contract with the spec 4.6 pseudocode,
+    which folded clip-and-scale into one clip-to-psi_dot_max line.
+  - FOV gate uses the TRUE bearing, not the noisy one: a camera only produces a
+    detection when the target is physically in frame, so noise cannot trigger spurious
+    FOV-loss termination. The step penalty still uses the NOISY theta_obs (spec 5).
+  - Spawn range: spec 4.4 says U(900, 1100) while section 7 names range_mean and
+    range_std; implemented U(mean - std, mean + std), which equals U(900, 1100) for
+    the defaults and follows 4.4's explicit uniform statement.
+  - Interceptor spawn heading points exactly at the intruder ("roughly toward"
+    interpreted as exactly toward), guaranteeing the target is in FOV at t = 0.
+  - Stage-2 weave amplitude was unspecified; tied it to A = psi_dot_max * T / (2*pi)
+    so the peak turn rate equals the intruder psi_dot_max and respects the bound.
+  - Added intruder.psi_dot_max (15 deg/s) and intruder.sin_period (8 s) to config:
+    stated in spec 4.3 but missing from the section 7 YAML; placed in config to avoid
+    hardcoding (no-hardcoding rule).
+  - Curriculum stage is pushed to the live envs via env_method("set_wrapper_attr", ...)
+    so it reaches InterceptEnv through the Monitor wrapper (plain VecEnv.set_attr sets
+    the attribute on the wrapper, where reset never reads it).
+  - Infra: ActionConfig lives in envs/intercept_env.py (no separate file in the map);
+    added conftest.py and package __init__.py files plus a sys.path bootstrap in entry
+    scripts so both pytest and `python eval/eval.py` style invocation import cleanly.
+- Git: initial implementation committed on main; this session log committed on
+  feature/initial-build (the spec's git step asked for a commit on that branch).
+- Next steps: run full 5e6-step training and tune curriculum thresholds (0.70/0.65);
+  add ONNX export for the Simulink policy slot (spec section 9); consider adding
+  bearing-rate (index 3) only if the LSTM cannot infer it from history.
+
 ---
 
 ## Physics constants (quick reference)
