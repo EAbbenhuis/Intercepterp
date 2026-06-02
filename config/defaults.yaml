@@ -39,7 +39,7 @@ sensor:
 
 reward:
   bearing_penalty:   0.05      # was 0.1, halved to reduce the loitering incentive
-  closing_reward:    0.015     # new: reward per metre of range decrease per step
+  closing_reward:    0.4       # new: reward per metre of range decrease per step
   success:           100.0     # unchanged
   fov_loss:         -100.0     # unchanged
   timeout:          -100.0     # was -50.0, hardened to remove the loitering equilibrium

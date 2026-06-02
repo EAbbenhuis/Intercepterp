@@ -23,6 +23,8 @@ Named after the Terp. Obviously.
   must never be broken by any refactor. See spec section 9.
 - `main` branch is always runnable. Work on feature branches.
   Branch names: `feature/description`. Conventional commits.
+- After every merge into main, push to origin. 
+  main is the GitHub default branch. Never change the default branch.
 
 ---
 
