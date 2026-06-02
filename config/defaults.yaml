@@ -6,11 +6,14 @@
 # them to radians at load time inside InterceptEnv. All speeds in m/s, all
 # distances in m, all times in s.
 #
-# The blocks "physics", "init", "sensor", "reward", "training" and "curriculum"
-# reproduce spec section 7 verbatim. The "intruder" block holds two values that
+# The blocks "output", "physics", "init", "sensor", "reward", "training" and
+# "curriculum" reproduce spec section 7 verbatim. The "intruder" block holds two
 # the spec states in section 4.3 (evasive turn rate 15 deg/s, sinusoidal period
 # ~8 s) but did not list in the section 7 YAML. They live here rather than being
 # hardcoded in intruder.py, to keep a single source of truth.
+
+output:
+  base_dir: "runs"
 
 physics:
   intruder_speed:    50.0      # m/s
