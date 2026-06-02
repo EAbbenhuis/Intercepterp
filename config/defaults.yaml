@@ -52,6 +52,7 @@ training:
   n_epochs:          4          # was 10
   learning_rate:     3.0e-4     # unchanged
   clip_range:        0.2        # unchanged
+  gamma:             0.99       # RecurrentPPO default; shared with VecNormalize reward normalisation
   lstm_hidden_size:  256        # unchanged
   lstm_n_layers:     1          # unchanged
 

@@ -24,6 +24,7 @@ import json
 import numpy as np
 import yaml
 from sb3_contrib import RecurrentPPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from envs.intercept_env import ActionConfig, InterceptEnv
 from eval.metrics import compute_metrics
@@ -59,7 +60,51 @@ def load_config(model_dir: pathlib.Path, explicit: str | None) -> dict:
         return yaml.safe_load(f)
 
 
-def run_episode(model, env: InterceptEnv, deterministic: bool) -> dict:
+def build_eval_env(config: dict, stage: int, seed: int) -> InterceptEnv:
+    """Construct the InterceptEnv used for evaluation at a given curriculum stage.
+
+    A single factory so the stage flows to exactly one place (and so tests can
+    assert the stage reaches the env). Kept as a plain gymnasium env, not a
+    VecEnv: the recurrent rollout below threads the LSTM state and reads the rich
+    per-step info dict, which the gymnasium API exposes directly.
+    """
+    return InterceptEnv(
+        config, ActionConfig(), curriculum_stage=stage, rng_seed=seed
+    )
+
+
+def load_obs_normalizer(model_dir: pathlib.Path, config: dict):
+    """Return an observation-normalising callable from a sibling VecNormalize.
+
+    Training saves vec_normalize.pkl next to the model. If present, its statistics
+    are loaded and its normalize_obs is returned so evaluation feeds the policy
+    exactly the observation distribution it trained on. Under the project's hard
+    rule norm_obs=False, this map is the identity; loading it keeps eval correct
+    if observation normalisation is ever enabled. Rewards are never normalised at
+    eval time: metrics come from the env's true reward and info, and the loaded
+    wrapper has norm_reward=False with training=False so no statistics update.
+    Returns the identity map when no vec_normalize.pkl is found.
+    """
+    vec_normalize_path = model_dir / "vec_normalize.pkl"
+    if not vec_normalize_path.exists():
+        return lambda obs: obs
+
+    # VecNormalize.load needs a venv to attach to; it is only used as a stateless
+    # observation transformer here and never stepped.
+    dummy = DummyVecEnv([lambda: InterceptEnv(config, ActionConfig())])
+    vec = VecNormalize.load(str(vec_normalize_path), dummy)
+    vec.training = False      # do not update stats during eval
+    vec.norm_reward = False   # evaluate on true rewards, not normalised
+    print(f"[eval] loaded VecNormalize stats from {vec_normalize_path}")
+    return vec.normalize_obs
+
+
+def run_episode(
+    model,
+    env: InterceptEnv,
+    deterministic: bool,
+    normalize_obs=lambda obs: obs,
+) -> dict:
     """Roll out one episode and return its summary dict for metrics."""
     obs, info = env.reset()
     lstm_states = None
@@ -70,7 +115,7 @@ def run_episode(model, env: InterceptEnv, deterministic: bool) -> dict:
 
     while not done:
         action, lstm_states = model.predict(
-            obs,
+            normalize_obs(obs),
             state=lstm_states,
             episode_start=episode_start,
             deterministic=deterministic,
@@ -103,14 +148,17 @@ def evaluate(args: argparse.Namespace) -> dict:
     print(f"[eval] stage = {stage}   n_eps = {args.n_eps}   deterministic = {not args.stochastic}")
 
     model = RecurrentPPO.load(str(model_path), device=args.device)
-    env = InterceptEnv(
-        config, ActionConfig(), curriculum_stage=stage, rng_seed=args.seed
-    )
+    env = build_eval_env(config, stage, args.seed)
+    # If the run saved VecNormalize stats, load them so the policy sees the same
+    # observation distribution it trained on (identity under norm_obs=False).
+    normalize_obs = load_obs_normalizer(model_dir, config)
     # Seed the first episode; later resets continue the stream for diversity.
     env.reset(seed=args.seed)
 
     episodes = [
-        run_episode(model, env, deterministic=not args.stochastic)
+        run_episode(
+            model, env, deterministic=not args.stochastic, normalize_obs=normalize_obs
+        )
         for _ in range(args.n_eps)
     ]
     env.close()
