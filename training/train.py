@@ -34,7 +34,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 
 from envs.intercept_env import ActionConfig, InterceptEnv
-from training.callbacks import build_callbacks
+from training.callbacks import EntropyDecayCallback, build_callbacks
 from training.curriculum import CurriculumScheduler
 
 ON_KAGGLE = os.path.exists("/kaggle/working")
@@ -44,16 +44,6 @@ BASE_DIR = "/kaggle/working/runs" if ON_KAGGLE else "runs"
 def load_config(path: str | pathlib.Path) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
-
-
-def linear_schedule(initial: float, final: float, end_fraction: float):
-    def schedule(progress_remaining: float) -> float:
-        # progress_remaining: 1.0 at start, 0.0 at end
-        fraction_done = 1.0 - progress_remaining
-        if fraction_done < end_fraction:
-            return initial + (final - initial) * (fraction_done / end_fraction)
-        return final
-    return schedule
 
 
 def make_env_factory(
@@ -195,7 +185,10 @@ def train(args: argparse.Namespace) -> pathlib.Path:
         n_epochs=int(tcfg["n_epochs"]),
         learning_rate=float(tcfg["learning_rate"]),
         clip_range=float(tcfg["clip_range"]),
-        ent_coef=linear_schedule(initial=0.02, final=0.001, end_fraction=0.6),
+        # RecurrentPPO does not accept a callable schedule for ent_coef (it would
+        # break at the first update with function * Tensor). Pass a fixed float
+        # and decay it at runtime via EntropyDecayCallback below.
+        ent_coef=0.01,
         policy_kwargs=policy_kwargs,
         tensorboard_log=str(run_dir / "tensorboard"),
         seed=args.seed,
@@ -203,8 +196,22 @@ def train(args: argparse.Namespace) -> pathlib.Path:
         verbose=1,
     )
 
+    # Entropy decay: linearly anneal ent_coef 0.02 -> 0.001 over the first 60% of
+    # training, then hold. total_timesteps is the resolved value (tuning or
+    # production), so the decay stays proportional in both modes.
+    entropy_cb = EntropyDecayCallback(
+        initial_value=0.02,
+        final_value=0.001,
+        end_fraction=0.6,
+        total_timesteps=total_timesteps,
+    )
+
     try:
-        model.learn(total_timesteps=total_timesteps, callback=callbacks, progress_bar=False)
+        model.learn(
+            total_timesteps=total_timesteps,
+            callback=[callbacks, entropy_cb],
+            progress_bar=False,
+        )
     finally:
         # Always persist the final model, even on KeyboardInterrupt.
         final_path = run_dir / "final_model.zip"

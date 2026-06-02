@@ -244,6 +244,28 @@ Append a new entry after every Claude Code session.
   diagnostic switch only; a production run requires enabled false (the default)
   and no --tuning flag.
 
+## 2026-06-02 (entropy schedule fix)
+- Bug: passing the callable linear_schedule to RecurrentPPO's ent_coef raised
+  TypeError: unsupported operand type(s) for *: 'function' and 'Tensor' at the
+  first update. sb3_contrib RecurrentPPO (like base SB3) only schedules
+  learning_rate and clip_range; ent_coef must be a plain float, used directly as
+  self.ent_coef * entropy_loss in train(), so a function there fails.
+- Fix (training/train.py): removed the linear_schedule function entirely and pass
+  a fixed ent_coef=0.01 to RecurrentPPO. Entropy decay is now applied at runtime.
+- training/callbacks.py: added EntropyDecayCallback(BaseCallback). Each _on_step
+  it sets self.model.ent_coef to a float linearly annealed from initial_value
+  0.02 to final_value 0.001 over the first end_fraction (0.6) of training, then
+  holds at final_value. Exported it in __all__.
+- training/train.py wires it in: instantiate EntropyDecayCallback with
+  total_timesteps equal to the resolved run length (tuning or production) so the
+  decay is proportional in both modes, and pass callback=[callbacks, entropy_cb]
+  to model.learn (SB3 wraps the list in a CallbackList). Net behaviour matches the
+  intended 0.02 -> 0.001 schedule, but now driven by a callback that mutates a
+  float instead of an unsupported callable.
+- No reward, env, sensor, or observation-space changes. All 19 tests pass; the
+  decay was unit-checked at 0%, 30%, 60%, and 100% progress (0.02, 0.0105, 0.001,
+  0.001).
+
 ---
 
 ## Physics constants (quick reference)
