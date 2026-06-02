@@ -109,6 +109,10 @@ def test_detonation_terminates(noiseless_config):
     # interceptor closes to ~0.6 m, inside the 5 m blast radius.
     env.interceptor.x, env.interceptor.y, env.interceptor.psi = 0.0, 0.0, 0.0
     env.intruder.x, env.intruder.y, env.intruder.psi = 2.0, 0.0, 0.0
+    # Neutralise the closing reward: with the previous observed range driven to
+    # 0, this step's range is larger, so closing = max(0, 0 - r) = 0 and the
+    # reward isolates the terminal component.
+    env.current_r_obs = 0.0
 
     obs, reward, terminated, truncated, info = env.step(_zero_action())
 
@@ -117,7 +121,8 @@ def test_detonation_terminates(noiseless_config):
     assert truncated is False
     assert info["termination_reason"] == "success"
     assert info["is_success"] is True
-    # Bearing is exactly 0 in this collinear geometry, so reward is purely +100.
+    # Bearing is exactly 0 in this collinear geometry and closing is zeroed,
+    # so reward is purely +100.
     assert reward == pytest.approx(env.reward_success)
 
 
@@ -128,6 +133,9 @@ def test_fov_loss_terminates(noiseless_config):
     # FOV, and far enough that detonation cannot pre-empt it.
     env.interceptor.x, env.interceptor.y, env.interceptor.psi = 0.0, 0.0, 0.0
     env.intruder.x, env.intruder.y, env.intruder.psi = 0.0, 100.0, 0.0
+    # Neutralise the closing reward so the assertion isolates the bearing penalty
+    # plus the terminal FOV-loss component.
+    env.current_r_obs = 0.0
 
     obs, reward, terminated, truncated, info = env.step(_zero_action())
 
@@ -136,7 +144,7 @@ def test_fov_loss_terminates(noiseless_config):
     assert truncated is False
     assert info["termination_reason"] == "fov_loss"
     assert info["is_success"] is False
-    # reward = r_step + fov_loss, with r_step = -alpha * |theta_obs|.
+    # reward = r_step + fov_loss, with r_step = -alpha * |theta_obs| (closing 0).
     expected = -env.alpha * abs(info["bearing_obs"]) + env.reward_fov_loss
     assert reward == pytest.approx(expected)
 
@@ -148,6 +156,8 @@ def test_timeout_truncates(noiseless_config):
     env.intruder.x, env.intruder.y, env.intruder.psi = 500.0, 0.0, 0.0
     # One dt short of the limit so the in-step increment trips it exactly.
     env.t = env.episode_timeout - env.dt
+    # Neutralise the closing reward so the assertion isolates the timeout penalty.
+    env.current_r_obs = 0.0
 
     obs, reward, terminated, truncated, info = env.step(_zero_action())
 
@@ -157,7 +167,8 @@ def test_timeout_truncates(noiseless_config):
     assert terminated is False
     assert truncated is True
     assert info["termination_reason"] == "timeout"
-    # Bearing is 0 in this collinear geometry, so reward is purely the penalty.
+    # Bearing is 0 in this collinear geometry and closing is zeroed, so reward
+    # is purely the timeout penalty.
     assert reward == pytest.approx(env.reward_timeout)
 
 
@@ -175,43 +186,76 @@ def test_terminated_truncated_are_never_both_true(config):
 
 def test_reward_constants_match_spec(config):
     env = make_env(config)
-    assert env.alpha == pytest.approx(0.1)
+    assert env.alpha == pytest.approx(0.05)
     assert env.reward_success == pytest.approx(100.0)
     assert env.reward_fov_loss == pytest.approx(-100.0)
-    assert env.reward_timeout == pytest.approx(-50.0)
+    assert env.reward_timeout == pytest.approx(-100.0)
+    assert env.config["reward"]["closing_reward"] == pytest.approx(0.015)
 
 
 def test_reward_values_exact(noiseless_config):
-    """Drive _compute_reward with controlled state to check exact arithmetic."""
+    """Drive _compute_reward with controlled state to check exact arithmetic.
+
+    reset() leaves prev_r_obs == current_r_obs, so the closing term is 0 here and
+    each case isolates the bearing penalty plus the terminal component.
+    """
     env = make_env(noiseless_config)
 
     # Ongoing step: only the bearing penalty applies.
     env.range, env.in_fov, env.t, env.sensor.last_bearing = 500.0, True, 0.0, 0.3
     reward, terminated, truncated = env._compute_reward()
-    assert reward == pytest.approx(-0.1 * 0.3)
+    assert reward == pytest.approx(-0.05 * 0.3)
     assert (terminated, truncated) == (False, False)
 
     # Success: penalty + 100, terminated.
     env.range, env.in_fov, env.t, env.sensor.last_bearing = 1.0, True, 0.0, 0.2
     reward, terminated, truncated = env._compute_reward()
-    assert reward == pytest.approx(-0.1 * 0.2 + 100.0)
+    assert reward == pytest.approx(-0.05 * 0.2 + 100.0)
     assert (terminated, truncated) == (True, False)
     assert env.termination_reason == "success"
 
     # FOV loss: penalty - 100, terminated.
     env.range, env.in_fov, env.t, env.sensor.last_bearing = 500.0, False, 0.0, 0.6
     reward, terminated, truncated = env._compute_reward()
-    assert reward == pytest.approx(-0.1 * 0.6 - 100.0)
+    assert reward == pytest.approx(-0.05 * 0.6 - 100.0)
     assert (terminated, truncated) == (True, False)
     assert env.termination_reason == "fov_loss"
 
-    # Timeout: penalty - 50, truncated.
+    # Timeout: penalty - 100, truncated.
     env.range, env.in_fov, env.sensor.last_bearing = 500.0, True, 0.1
     env.t = env.episode_timeout
     reward, terminated, truncated = env._compute_reward()
-    assert reward == pytest.approx(-0.1 * 0.1 - 50.0)
+    assert reward == pytest.approx(-0.05 * 0.1 - 100.0)
     assert (terminated, truncated) == (False, True)
     assert env.termination_reason == "timeout"
+
+
+def test_closing_reward_positive_when_range_decreases(noiseless_config):
+    """A drop in observed range between consecutive steps must pay a bonus."""
+    env = make_env(noiseless_config)
+    # Ongoing, in-view, collinear (zero bearing) so only the closing term is left.
+    env.range, env.in_fov, env.t, env.sensor.last_bearing = 500.0, True, 0.0, 0.0
+    env.prev_r_obs, env.current_r_obs = 600.0, 500.0  # 100 m of closing
+
+    reward, terminated, truncated = env._compute_reward()
+
+    closing_coeff = env.config["reward"]["closing_reward"]
+    assert reward > 0.0
+    assert reward == pytest.approx(closing_coeff * 100.0)
+    assert (terminated, truncated) == (False, False)
+
+
+def test_closing_reward_zero_when_range_increases(noiseless_config):
+    """A rise in observed range must not be rewarded (and never penalised)."""
+    env = make_env(noiseless_config)
+    env.range, env.in_fov, env.t, env.sensor.last_bearing = 500.0, True, 0.0, 0.0
+    env.prev_r_obs, env.current_r_obs = 500.0, 600.0  # range grew by 100 m
+
+    reward, terminated, truncated = env._compute_reward()
+
+    # Bearing is 0 and the closing term clips to 0, so the step reward is exactly 0.
+    assert reward == pytest.approx(0.0)
+    assert (terminated, truncated) == (False, False)
 
 
 def test_reward_priority_success_over_fov_loss(noiseless_config):
@@ -273,3 +317,42 @@ def test_reset_is_seed_reproducible(config):
         sb = env_b.step(a)
         assert np.array_equal(sa[0], sb[0])
         assert sa[1] == sb[1]
+
+
+# ------------------------------------------------- tuning mode + performance --
+
+def test_tuning_range_override(noiseless_config):
+    """A 300 m tuning spawn must place the target at r_obs in 300 +- 10%.
+
+    Sensor noise is removed so r_obs equals the true spawn range exactly; the
+    spawn band is U(range_mean - range_std, range_mean + range_std) = U(270, 330),
+    which is what the tuning override (range_mean 300, range_std 30) produces.
+    """
+    cfg = copy.deepcopy(noiseless_config)
+    cfg["init"]["range_mean"] = 300.0
+    cfg["init"]["range_std"] = 30.0
+    env = InterceptEnv(cfg, ActionConfig(), curriculum_stage=1, rng_seed=0)
+
+    for seed in range(25):
+        obs, _ = env.reset(seed=seed)
+        r_obs = float(obs[1])
+        assert 270.0 <= r_obs <= 330.0
+
+
+def test_no_render_in_step(config):
+    """With render_mode=None, stepping must never create a matplotlib figure."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    env = make_env(config)  # make_env leaves render_mode at its None default
+    assert env.render_mode is None
+
+    before = len(plt.get_fignums())
+    for _ in range(100):
+        _, _, terminated, truncated, _ = env.step(env.action_space.sample())
+        if terminated or truncated:
+            env.reset()
+    after = len(plt.get_fignums())
+
+    assert after <= before

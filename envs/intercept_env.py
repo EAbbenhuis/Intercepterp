@@ -132,6 +132,11 @@ class InterceptEnv(BaseEnv):
         self.in_fov = True
         self.termination_reason = ""
         self._last_obs = np.zeros(3, dtype=np.float32)
+        # Observed (noisy) range at the previous and current step, metres. Used
+        # by the closing reward so the agent is paid for shrinking the estimated
+        # range. Both initialised in reset() to the initial observed range.
+        self.prev_r_obs = 0.0
+        self.current_r_obs = 0.0
 
         # Trajectory buffers for rendering. Only populated when rendering, to
         # keep training (render_mode=None) free of this overhead.
@@ -174,6 +179,11 @@ class InterceptEnv(BaseEnv):
         self.in_fov = in_fov
         self._last_obs = self._clip_obs(obs)
 
+        # Seed the closing-reward baseline with the initial observed range, so the
+        # first step's closing reward measures the change from t = 0.
+        self.prev_r_obs = float(obs[1])
+        self.current_r_obs = float(obs[1])
+
         if self.render_mode == "rgb_array":
             self._traj_interceptor = [(self.interceptor.x, self.interceptor.y)]
             self._traj_intruder = [(self.intruder.x, self.intruder.y)]
@@ -184,6 +194,21 @@ class InterceptEnv(BaseEnv):
         self,
         action: np.ndarray,
     ) -> tuple[np.ndarray, float, bool, bool, dict]:
+        # Performance audit (perf-and-tuning-mode): step() and _compute_reward()
+        # were audited against the three hot-path concerns and no changes were
+        # needed.
+        #   (a) Matplotlib: every import, figure, and draw call lives inside
+        #       render(), which returns immediately unless render_mode is
+        #       "rgb_array". step()/reset() only append scalars to the trajectory
+        #       lists, and only under that same render guard, so nothing in
+        #       matplotlib runs on the training path.
+        #   (b) Disk I/O: step() writes nothing to disk. The only JSON/file writes
+        #       are in callbacks.py, fired on episode-end events, not per step.
+        #   (c) NumPy: observe() and the Dubins updates in intruder.py/
+        #       interceptor.py use scalar numpy or plain math; the single array
+        #       built per step is the fixed 3-element obs vector. There is no
+        #       per-step list-to-array conversion of data and no Python loop over
+        #       arrays where a vectorised op would serve.
         action = np.asarray(action, dtype=np.float32).reshape(-1)
 
         # 1. Move the interceptor (action is normalized; scaled internally).
@@ -201,6 +226,11 @@ class InterceptEnv(BaseEnv):
         self.range = self.sensor.last_true_range
         self.in_fov = in_fov
         self._last_obs = self._clip_obs(obs)
+
+        # Roll the observed-range window forward before rewarding: prev_r_obs is
+        # last step's observed range, current_r_obs is this step's.
+        self.prev_r_obs = self.current_r_obs
+        self.current_r_obs = float(obs[1])
 
         # 4 + 5. Reward and termination.
         reward, terminated, truncated = self._compute_reward()
@@ -244,23 +274,35 @@ class InterceptEnv(BaseEnv):
     def _compute_reward(self) -> tuple[float, bool, bool]:
         """Return (reward, terminated, truncated) for the current state.
 
-        Mirrors spec section 4.6 exactly. The per-step penalty uses the NOISY
-        observed bearing (sensor.last_bearing == theta_obs), per spec section 5.
+        Reward v2 (loitering fix). The per-step penalty uses the NOISY observed
+        bearing (sensor.last_bearing == theta_obs), per spec section 5, with a
+        halved coefficient to weaken the loitering incentive. A closing reward
+        pays for shrinking the observed range, so absorbing the (now hardened)
+        timeout penalty by orbiting at fixed range is no longer an equilibrium.
         Priority is success, then FOV loss, then timeout: detonation always wins.
+        The termination_reason assignments are retained because eval, the info
+        dict, and the curriculum's is_success flag all read them.
         """
-        r_step = -self.alpha * abs(self.sensor.last_bearing)
+        # Bearing penalty (halved)
+        r_step = -self.config["reward"]["bearing_penalty"] * abs(self.sensor.last_bearing)
 
-        if self.range < self.blast_radius:
+        # Closing reward: only reward range decrease, never penalise increase
+        # Uses noisy r_obs consistent with GPS-denied sensor model
+        closing = max(0.0, self.prev_r_obs - self.current_r_obs)
+        r_step += self.config["reward"]["closing_reward"] * closing
+
+        # Terminal conditions
+        if self.range < self.config["physics"]["blast_radius"]:
             self.termination_reason = "success"
-            return r_step + self.reward_success, True, False
+            return r_step + self.config["reward"]["success"], True, False
 
         if not self.in_fov:
             self.termination_reason = "fov_loss"
-            return r_step + self.reward_fov_loss, True, False
+            return r_step + self.config["reward"]["fov_loss"], True, False
 
-        if self.t >= self.episode_timeout:
+        if self.t >= self.config["physics"]["episode_timeout"]:
             self.termination_reason = "timeout"
-            return r_step + self.reward_timeout, False, True
+            return r_step + self.config["reward"]["timeout"], False, True
 
         self.termination_reason = ""
         return r_step, False, False
