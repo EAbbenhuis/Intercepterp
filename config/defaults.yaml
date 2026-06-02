@@ -38,10 +38,11 @@ sensor:
   range_noise_frac:  0.05      # fraction of true range
 
 reward:
-  bearing_penalty:   0.1       # alpha in r_step = -alpha * |theta|
-  success:           100.0
-  fov_loss:         -100.0
-  timeout:          -50.0
+  bearing_penalty:   0.05      # was 0.1, halved to reduce the loitering incentive
+  closing_reward:    0.015     # new: reward per metre of range decrease per step
+  success:           100.0     # unchanged
+  fov_loss:         -100.0     # unchanged
+  timeout:          -100.0     # was -50.0, hardened to remove the loitering equilibrium
 
 training:
   total_timesteps:   5_000_000

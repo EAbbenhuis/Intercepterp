@@ -88,10 +88,11 @@ def observe(
 
 ### Reward
 ```
-r_step     = -0.1 * |theta_obs|       every step
-r_terminal = +100  if r < 5m          (terminated, success)
-           = -100  if |theta| > 30 deg (terminated, FOV loss)
-           = -50   if t > 30s          (truncated, timeout)
+r_step     = -0.05 * |theta_obs|                       every step
+           + 0.015 * max(0, r_obs[t-1] - r_obs[t])    closing reward
+r_terminal = +100  if r < 5m                           (terminated, success)
+           = -100  if |theta| > 30 deg                 (terminated, FOV loss)
+           = -100  if t > 30s                          (truncated, timeout)
 ```
 
 ---
@@ -178,6 +179,39 @@ Append a new entry after every Claude Code session.
 - Added device selection prints and GPU name logging in training entry point.
 - Added requirements.txt for Kaggle installation.
 - Tests: python -m pytest tests/test_env.py
+
+## 2026-06-02 (reward v2: loitering fix)
+- Behavioural problem: the policy converged to a loitering local minimum, holding
+  the target near 10 deg bearing and absorbing the soft timeout penalty instead of
+  closing. Applied targeted reward and training fixes (no kinematics, observation,
+  sensor, curriculum, or file-structure changes).
+- config/defaults.yaml reward block: bearing_penalty 0.1 -> 0.05 (the loitering
+  incentive scaled with this penalty, so orbiting at a small bearing was cheap;
+  halving it weakens that pull). Added closing_reward 0.015 per metre of observed
+  range decrease per step (gives a dense gradient toward closing, which a sparse
+  +100-only success signal failed to provide). timeout -50 -> -100 (the soft
+  penalty made fixed-range loitering a stable equilibrium; hardening it removes
+  that equilibrium so timing out is strictly worse than attempting an intercept).
+- envs/intercept_env.py: _compute_reward now adds closing = max(0, prev_r_obs -
+  current_r_obs) * closing_reward, using the NOISY observed range (consistent with
+  the GPS-denied sensor model) and never penalising range increase, so evasive
+  geometry cannot produce a negative closing term. Added prev_r_obs/current_r_obs
+  instance vars: prev_r_obs seeds in reset() to the initial observed range, and
+  step() rolls the window forward (prev <- current, current <- obs[1]) before
+  rewarding. The termination_reason assignments were retained inside
+  _compute_reward because eval, the info dict, and the curriculum is_success flag
+  all read them; dropping them (as the literal patch snippet did) would silently
+  break curriculum advancement, which the hard rules forbid.
+- training/train.py: replaced the implicit fixed entropy coefficient with
+  ent_coef=linear_schedule(0.02 -> 0.001 over the first 60% of training). High
+  early entropy keeps exploration alive long enough to discover closing behaviour
+  before the policy commits; the decay then lets it sharpen the intercept.
+- tests/test_env.py: timeout penalty assertions -50 -> -100; bearing-penalty
+  multipliers 0.1 -> 0.05; added a closing_reward constant check; added two tests
+  (closing reward positive when range decreases, zero when range increases). The
+  three geometry-override termination tests set current_r_obs = 0 before stepping
+  so the spurious range jump from manual respawn cannot leak into the closing term
+  and the assertions still isolate the terminal reward. All 17 tests pass.
 
 ---
 

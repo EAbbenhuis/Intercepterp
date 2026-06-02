@@ -46,6 +46,16 @@ def load_config(path: str | pathlib.Path) -> dict:
         return yaml.safe_load(f)
 
 
+def linear_schedule(initial: float, final: float, end_fraction: float):
+    def schedule(progress_remaining: float) -> float:
+        # progress_remaining: 1.0 at start, 0.0 at end
+        fraction_done = 1.0 - progress_remaining
+        if fraction_done < end_fraction:
+            return initial + (final - initial) * (fraction_done / end_fraction)
+        return final
+    return schedule
+
+
 def make_env_factory(
     config: dict,
     stage: int,
@@ -154,6 +164,7 @@ def train(args: argparse.Namespace) -> pathlib.Path:
         n_epochs=int(tcfg["n_epochs"]),
         learning_rate=float(tcfg["learning_rate"]),
         clip_range=float(tcfg["clip_range"]),
+        ent_coef=linear_schedule(initial=0.02, final=0.001, end_fraction=0.6),
         policy_kwargs=policy_kwargs,
         tensorboard_log=str(run_dir / "tensorboard"),
         seed=args.seed,
