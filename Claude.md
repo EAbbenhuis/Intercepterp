@@ -268,6 +268,27 @@ Append a new entry after every Claude Code session.
   decay was unit-checked at 0%, 30%, 60%, and 100% progress (0.02, 0.0105, 0.001,
   0.001).
 
+## 2026-06-02 (eval stage default + reward test reconcile)
+- Bug: eval/eval.py defaulted the evaluation stage to the final curriculum stage
+  via stage = args.stage or len(config["curriculum"]["thresholds"]) (== 3), so a
+  plain eval ran the full-difficulty task even for a stage-1 policy. Fixed to
+  default to stage 1: --stage now has default=1 and stage = args.stage is passed
+  straight to InterceptEnv. --stage still overrides for stages 2 and 3.
+- Sweep integration: train.py does not call eval.py as a subprocess; in-training
+  evaluation is callback-driven (SB3 EvalCallback on eval_env), and eval_env is
+  already built with the correct stage (tuning freezes at stage 1, otherwise the
+  CLI/curriculum stage kept in sync by CurriculumCallback), so no callback change
+  was needed. The only eval.py touch point was the end-of-run hint, which now
+  prints --stage {scheduler.current_stage}: that is 1 in tuning mode (frozen
+  scheduler) and the current curriculum stage otherwise, matching the spec.
+- Reward tests: test_reward_constants_match_spec and test_reward_values_exact
+  still encoded the reward-v2 constants (bearing_penalty 0.05, timeout -100),
+  which no longer match the committed reward config (bearing_penalty 0.1,
+  closing_reward 0.15, timeout -50). Per an explicit decision this session, the
+  two tests were reconciled to the current config so the suite is green. These
+  expected constants track config and must be updated again if the reward block
+  changes. All 19 tests pass.
+
 ---
 
 ## Physics constants (quick reference)

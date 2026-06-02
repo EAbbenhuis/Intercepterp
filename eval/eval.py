@@ -96,8 +96,8 @@ def evaluate(args: argparse.Namespace) -> dict:
     model_dir = model_path.parent
 
     config = load_config(model_dir, args.config)
-    # Default evaluation stage = final curriculum stage (full-difficulty task).
-    stage = args.stage or len(config["curriculum"]["thresholds"])
+    # Evaluation stage defaults to stage 1; override with --stage.
+    stage = args.stage
 
     print(f"[eval] model = {model_path}")
     print(f"[eval] stage = {stage}   n_eps = {args.n_eps}   deterministic = {not args.stochastic}")
@@ -147,8 +147,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate an Intercepterp policy.")
     p.add_argument("--model", required=True, help="path to a saved .zip model")
     p.add_argument("--n-eps", type=int, default=100, help="number of episodes")
-    p.add_argument("--stage", type=int, default=None,
-                   help="curriculum stage to evaluate at (default: final stage)")
+    p.add_argument(
+        "--stage",
+        type=int,
+        default=1,
+        help="Curriculum stage to evaluate on. Default: 1."
+    )
     p.add_argument("--config", default=None,
                    help="config override (default: run snapshot, then repo defaults)")
     p.add_argument("--out", default=None,

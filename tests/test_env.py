@@ -186,7 +186,7 @@ def test_terminated_truncated_are_never_both_true(config):
 
 def test_reward_constants_match_spec(config):
     env = make_env(config)
-    assert env.alpha == pytest.approx(0.05)
+    assert env.alpha == pytest.approx(0.1)
     assert env.reward_success == pytest.approx(100.0)
     assert env.reward_fov_loss == pytest.approx(-100.0)
     assert env.reward_timeout == pytest.approx(-50.0)
@@ -204,28 +204,28 @@ def test_reward_values_exact(noiseless_config):
     # Ongoing step: only the bearing penalty applies.
     env.range, env.in_fov, env.t, env.sensor.last_bearing = 500.0, True, 0.0, 0.3
     reward, terminated, truncated = env._compute_reward()
-    assert reward == pytest.approx(-0.05 * 0.3)
+    assert reward == pytest.approx(-0.1 * 0.3)
     assert (terminated, truncated) == (False, False)
 
     # Success: penalty + 100, terminated.
     env.range, env.in_fov, env.t, env.sensor.last_bearing = 1.0, True, 0.0, 0.2
     reward, terminated, truncated = env._compute_reward()
-    assert reward == pytest.approx(-0.05 * 0.2 + 100.0)
+    assert reward == pytest.approx(-0.1 * 0.2 + 100.0)
     assert (terminated, truncated) == (True, False)
     assert env.termination_reason == "success"
 
     # FOV loss: penalty - 100, terminated.
     env.range, env.in_fov, env.t, env.sensor.last_bearing = 500.0, False, 0.0, 0.6
     reward, terminated, truncated = env._compute_reward()
-    assert reward == pytest.approx(-0.05 * 0.6 - 100.0)
+    assert reward == pytest.approx(-0.1 * 0.6 - 100.0)
     assert (terminated, truncated) == (True, False)
     assert env.termination_reason == "fov_loss"
 
-    # Timeout: penalty - 100, truncated.
+    # Timeout: penalty - 50, truncated.
     env.range, env.in_fov, env.sensor.last_bearing = 500.0, True, 0.1
     env.t = env.episode_timeout
     reward, terminated, truncated = env._compute_reward()
-    assert reward == pytest.approx(-0.05 * 0.1 - 100.0)
+    assert reward == pytest.approx(-0.1 * 0.1 - 50.0)
     assert (terminated, truncated) == (False, True)
     assert env.termination_reason == "timeout"
 

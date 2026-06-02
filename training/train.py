@@ -257,8 +257,12 @@ def train(args: argparse.Namespace) -> pathlib.Path:
         best_path = run_dir / "best_model.zip"
         print(f"[train] best model path: {best_path}")
 
+        # Evaluate on the stage that was actually trained: tuning freezes the
+        # scheduler at stage 1, otherwise this is the current curriculum stage.
+        eval_stage = scheduler.current_stage
         print(f"[train] done. evaluate with:\n"
-          f"  python eval/eval.py --model {run_dir / 'best_model.zip'} --n-eps 100")
+          f"  python eval/eval.py --model {run_dir / 'best_model.zip'} "
+          f"--n-eps 100 --stage {eval_stage}")
     return run_dir
 
 
