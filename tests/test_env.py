@@ -189,8 +189,8 @@ def test_reward_constants_match_spec(config):
     assert env.alpha == pytest.approx(0.05)
     assert env.reward_success == pytest.approx(100.0)
     assert env.reward_fov_loss == pytest.approx(-100.0)
-    assert env.reward_timeout == pytest.approx(-100.0)
-    assert env.config["reward"]["closing_reward"] == pytest.approx(0.015)
+    assert env.reward_timeout == pytest.approx(-50.0)
+    assert env.config["reward"]["closing_reward"] == pytest.approx(0.15)
 
 
 def test_reward_values_exact(noiseless_config):

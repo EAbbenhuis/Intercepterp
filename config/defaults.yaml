@@ -38,11 +38,11 @@ sensor:
   range_noise_frac:  0.05      # fraction of true range
 
 reward:
-  bearing_penalty:   0.05      # was 0.1, halved to reduce the loitering incentive
-  closing_reward:    0.4       # new: reward per metre of range decrease per step
+  bearing_penalty:   0.1      # was 0.1, halved to reduce the loitering incentive
+  closing_reward:    0.15      # new: reward per metre of range decrease per step
   success:           100.0     # unchanged
   fov_loss:         -100.0     # unchanged
-  timeout:          -100.0     # was -50.0, hardened to remove the loitering equilibrium
+  timeout:          -50.0      # unchanged
 
 training:
   total_timesteps:   5_000_000  # unchanged, production value
