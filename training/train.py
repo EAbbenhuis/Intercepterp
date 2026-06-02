@@ -46,6 +46,37 @@ def load_config(path: str | pathlib.Path) -> dict:
         return yaml.safe_load(f)
 
 
+# Config blocks searched, in order, when resolving a bare --override key to its
+# dotted location. The first block that holds the key wins, which mirrors the
+# single-source-of-truth layout of defaults.yaml.
+_OVERRIDE_BLOCKS = ("reward", "training", "physics", "init", "tuning")
+
+
+def apply_overrides(config: dict, overrides: list[str]) -> None:
+    """Apply --override KEY=VALUE pairs to config in place.
+
+    KEY is a leaf parameter name (e.g. closing_reward), resolved to its block by
+    the fixed _OVERRIDE_BLOCKS search order. Values are always numeric and cast
+    to float; the int-typed consumers re-cast when they read the config, so a
+    float value is safe to store.
+    """
+    for item in overrides:
+        if "=" not in item:
+            raise ValueError(f"--override expects KEY=VALUE, got {item!r}")
+        key, _, raw = item.partition("=")
+        key = key.strip()
+        value = float(raw.strip())
+        for block in _OVERRIDE_BLOCKS:
+            if block in config and key in config[block]:
+                config[block][key] = value
+                print(f"[train] override: {block}.{key} = {value}")
+                break
+        else:
+            raise KeyError(
+                f"--override key {key!r} not found in blocks {list(_OVERRIDE_BLOCKS)}"
+            )
+
+
 def make_env_factory(
     config: dict,
     stage: int,
@@ -85,6 +116,9 @@ def build_vec_env(
 
 def train(args: argparse.Namespace) -> pathlib.Path:
     config = load_config(args.config)
+
+    # Apply any --override KEY=VALUE pairs to the freshly loaded config.
+    apply_overrides(config, getattr(args, "override", []))
 
     # Fast tuning mode: a short diagnostic run with close spawns and the
     # curriculum frozen at the tuning stage. Overrides are applied to the
@@ -248,6 +282,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--tuning",
         action="store_true",
         help="Enable fast tuning mode: 300k steps, 300m range, stage 1 only."
+    )
+    p.add_argument(
+        "--override",
+        action="append",
+        metavar="KEY=VALUE",
+        default=[],
+        help="Override a config value. Can be used multiple times."
     )
     return p.parse_args(argv)
 
