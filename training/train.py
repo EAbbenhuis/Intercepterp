@@ -126,6 +126,7 @@ def train(args: argparse.Namespace) -> pathlib.Path:
     # Curriculum + callbacks.
     scheduler = CurriculumScheduler(
         thresholds=ccfg["thresholds"],
+        min_success_rate=ccfg.get("min_success_rate", 0.70),
         window_size=int(ccfg["window_size"]),
         patience=int(ccfg["patience"]),
     )

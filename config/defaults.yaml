@@ -57,4 +57,5 @@ training:
 curriculum:
   window_size:       100
   patience:          500
+  min_success_rate:  0.70
   thresholds:        [0.70, 0.65, null]
