@@ -95,6 +95,22 @@ def build_vec_env(
 
 def train(args: argparse.Namespace) -> pathlib.Path:
     config = load_config(args.config)
+
+    # Fast tuning mode: a short diagnostic run with close spawns and the
+    # curriculum frozen at the tuning stage. Overrides are applied to the
+    # in-memory config so every downstream consumer (envs, hyperparameters)
+    # sees one consistent picture. Never a production run.
+    tuning = bool(getattr(args, "tuning", False))
+    if tuning:
+        tune = config["tuning"]
+        print("=" * 60)
+        print("  TUNING MODE ENABLED - not a production run")
+        print(f"  Range: {tune['range_mean']}m, Steps: {tune['total_timesteps']}")
+        print("=" * 60)
+        config["init"]["range_mean"] = tune["range_mean"]
+        config["init"]["range_std"] = tune["range_std"]
+        config["training"]["total_timesteps"] = tune["total_timesteps"]
+
     tcfg = config["training"]
     ccfg = config["curriculum"]
     output_cfg = config.get("output", {})
@@ -102,6 +118,9 @@ def train(args: argparse.Namespace) -> pathlib.Path:
     # Resolve overridable hyperparameters.
     total_timesteps = args.timesteps or int(tcfg["total_timesteps"])
     n_envs = args.n_envs or int(tcfg["n_envs"])
+
+    # Curriculum stage: tuning locks to the tuning stage; otherwise the CLI stage.
+    stage = int(config["tuning"]["stage"]) if tuning else args.stage
 
     # Run directory.
     if args.run_dir:
@@ -130,16 +149,28 @@ def train(args: argparse.Namespace) -> pathlib.Path:
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
     # Environments.
-    train_env = build_vec_env(config, n_envs, args.stage, args.seed, args.subproc)
-    eval_env = build_vec_env(config, 1, args.stage, args.seed + 10_000, False)
+    train_env = build_vec_env(config, n_envs, stage, args.seed, args.subproc)
+    eval_env = build_vec_env(config, 1, stage, args.seed + 10_000, False)
 
-    # Curriculum + callbacks.
-    scheduler = CurriculumScheduler(
-        thresholds=ccfg["thresholds"],
-        min_success_rate=ccfg.get("min_success_rate", 0.70),
-        window_size=int(ccfg["window_size"]),
-        patience=int(ccfg["patience"]),
-    )
+    # Curriculum + callbacks. In tuning mode the curriculum is frozen: a single
+    # stage scheduler is final from the start, so update() never advances and the
+    # env stays at the tuning stage for the whole diagnostic run. The thresholds
+    # in config are untouched; this only affects the in-memory tuning scheduler.
+    freeze_curriculum = tuning and bool(config["tuning"].get("freeze_curriculum", True))
+    if freeze_curriculum:
+        scheduler = CurriculumScheduler(
+            thresholds=[None],
+            min_success_rate=None,
+            window_size=int(ccfg["window_size"]),
+            patience=int(ccfg["patience"]),
+        )
+    else:
+        scheduler = CurriculumScheduler(
+            thresholds=ccfg["thresholds"],
+            min_success_rate=ccfg.get("min_success_rate", 0.70),
+            window_size=int(ccfg["window_size"]),
+            patience=int(ccfg["patience"]),
+        )
     eval_freq_calls = max(args.eval_freq // n_envs, 1)
     callbacks = build_callbacks(
         scheduler,
@@ -206,6 +237,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--eval-episodes", type=int, default=50)
     p.add_argument("--subproc", action="store_true",
                    help="use SubprocVecEnv instead of DummyVecEnv")
+    p.add_argument(
+        "--tuning",
+        action="store_true",
+        help="Enable fast tuning mode: 300k steps, 300m range, stage 1 only."
+    )
     return p.parse_args(argv)
 
 

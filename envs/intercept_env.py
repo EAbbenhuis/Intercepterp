@@ -194,6 +194,21 @@ class InterceptEnv(BaseEnv):
         self,
         action: np.ndarray,
     ) -> tuple[np.ndarray, float, bool, bool, dict]:
+        # Performance audit (perf-and-tuning-mode): step() and _compute_reward()
+        # were audited against the three hot-path concerns and no changes were
+        # needed.
+        #   (a) Matplotlib: every import, figure, and draw call lives inside
+        #       render(), which returns immediately unless render_mode is
+        #       "rgb_array". step()/reset() only append scalars to the trajectory
+        #       lists, and only under that same render guard, so nothing in
+        #       matplotlib runs on the training path.
+        #   (b) Disk I/O: step() writes nothing to disk. The only JSON/file writes
+        #       are in callbacks.py, fired on episode-end events, not per step.
+        #   (c) NumPy: observe() and the Dubins updates in intruder.py/
+        #       interceptor.py use scalar numpy or plain math; the single array
+        #       built per step is the fixed 3-element obs vector. There is no
+        #       per-step list-to-array conversion of data and no Python loop over
+        #       arrays where a vectorised op would serve.
         action = np.asarray(action, dtype=np.float32).reshape(-1)
 
         # 1. Move the interceptor (action is normalized; scaled internally).

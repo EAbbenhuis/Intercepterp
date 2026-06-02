@@ -45,18 +45,26 @@ reward:
   timeout:          -100.0     # was -50.0, hardened to remove the loitering equilibrium
 
 training:
-  total_timesteps:   5_000_000
-  n_envs:            8
-  n_steps:           2048
-  batch_size:        256
-  n_epochs:          10
-  learning_rate:     3.0e-4
-  clip_range:        0.2
-  lstm_hidden_size:  256
-  lstm_n_layers:     1
+  total_timesteps:   5_000_000  # unchanged, production value
+  n_envs:            32         # was 8
+  n_steps:           512        # was 2048
+  batch_size:        256        # unchanged
+  n_epochs:          4          # was 10
+  learning_rate:     3.0e-4     # unchanged
+  clip_range:        0.2        # unchanged
+  lstm_hidden_size:  256        # unchanged
+  lstm_n_layers:     1          # unchanged
 
 curriculum:
   window_size:       100
   patience:          500
   min_success_rate:  0.70
   thresholds:        [0.70, 0.65, null]
+
+tuning:
+  enabled:            false     # never true in production
+  total_timesteps:    300_000   # fast diagnostic run
+  range_mean:         300.0     # override init.range_mean when enabled
+  range_std:          30.0      # override init.range_std when enabled
+  freeze_curriculum:  true      # lock to stage 1 only when enabled
+  stage:              1

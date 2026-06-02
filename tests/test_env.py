@@ -317,3 +317,42 @@ def test_reset_is_seed_reproducible(config):
         sb = env_b.step(a)
         assert np.array_equal(sa[0], sb[0])
         assert sa[1] == sb[1]
+
+
+# ------------------------------------------------- tuning mode + performance --
+
+def test_tuning_range_override(noiseless_config):
+    """A 300 m tuning spawn must place the target at r_obs in 300 +- 10%.
+
+    Sensor noise is removed so r_obs equals the true spawn range exactly; the
+    spawn band is U(range_mean - range_std, range_mean + range_std) = U(270, 330),
+    which is what the tuning override (range_mean 300, range_std 30) produces.
+    """
+    cfg = copy.deepcopy(noiseless_config)
+    cfg["init"]["range_mean"] = 300.0
+    cfg["init"]["range_std"] = 30.0
+    env = InterceptEnv(cfg, ActionConfig(), curriculum_stage=1, rng_seed=0)
+
+    for seed in range(25):
+        obs, _ = env.reset(seed=seed)
+        r_obs = float(obs[1])
+        assert 270.0 <= r_obs <= 330.0
+
+
+def test_no_render_in_step(config):
+    """With render_mode=None, stepping must never create a matplotlib figure."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    env = make_env(config)  # make_env leaves render_mode at its None default
+    assert env.render_mode is None
+
+    before = len(plt.get_fignums())
+    for _ in range(100):
+        _, _, terminated, truncated, _ = env.step(env.action_space.sample())
+        if terminated or truncated:
+            env.reset()
+    after = len(plt.get_fignums())
+
+    assert after <= before

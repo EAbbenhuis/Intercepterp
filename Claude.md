@@ -213,6 +213,37 @@ Append a new entry after every Claude Code session.
   so the spurious range jump from manual respawn cannot leak into the closing term
   and the assertions still isolate the terminal reward. All 17 tests pass.
 
+## 2026-06-02 (performance and fast tuning mode)
+- Throughput-only changes plus a diagnostic tuning mode. No reward logic, env
+  kinematics, sensor model, curriculum thresholds, or observation space touched.
+- config/defaults.yaml training block: n_envs 8 -> 32, n_steps 2048 -> 512,
+  n_epochs 10 -> 4 (more parallel rollout workers with shorter, cheaper PPO
+  updates raises wall-clock throughput; batch_size, lr, clip_range, and the LSTM
+  sizes are unchanged). total_timesteps stays at the 5e6 production value.
+- Added a tuning block: enabled false (must stay false when committed),
+  total_timesteps 300k, range_mean 300 / range_std 30, freeze_curriculum true,
+  stage 1. It is the single source of truth for the diagnostic run.
+- training/train.py: added a --tuning store_true flag. When set, train() prints a
+  visible banner and overrides config init.range_mean, init.range_std, and
+  training.total_timesteps from the tuning block, pins the env curriculum_stage to
+  tuning.stage, and freezes the curriculum by building a single-stage scheduler
+  (thresholds=[None]) that is final from the start and never advances. The
+  config thresholds are not mutated; the freeze is in-memory and tuning-only.
+  Without --tuning, behaviour is byte-for-byte identical to before.
+- envs/intercept_env.py: performance audit of step() and _compute_reward(). All
+  three checks passed with no code change required (matplotlib is confined to the
+  render_mode-guarded render(); step() does no disk I/O; observe() and the Dubins
+  updates use scalar numpy or plain math with no per-step list-to-array of data
+  and no Python loops over arrays). The audit result is documented as a comment at
+  the top of step().
+- tests/test_env.py: added test_tuning_range_override (noiseless 300 m spawn keeps
+  r_obs in [270, 330] across 25 seeds) and test_no_render_in_step (100 steps with
+  render_mode=None create no matplotlib figures, checked via get_fignums). All 19
+  tests pass.
+- WARNING: tuning mode must never be committed with enabled: true. It is a local
+  diagnostic switch only; a production run requires enabled false (the default)
+  and no --tuning flag.
+
 ---
 
 ## Physics constants (quick reference)
