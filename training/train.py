@@ -31,7 +31,12 @@ import torch
 import yaml
 from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
+from stable_baselines3.common.vec_env import (
+    DummyVecEnv,
+    SubprocVecEnv,
+    VecEnv,
+    VecNormalize,
+)
 
 from envs.intercept_env import ActionConfig, InterceptEnv
 from training.callbacks import EntropyDecayCallback, build_callbacks
@@ -176,6 +181,38 @@ def train(args: argparse.Namespace) -> pathlib.Path:
     train_env = build_vec_env(config, n_envs, stage, args.seed, args.subproc)
     eval_env = build_vec_env(config, 1, stage, args.seed + 10_000, False)
 
+    # Reward normalisation (critic fix). The raw reward mixes a dense bearing
+    # penalty and closing bonus with +/-100 terminal spikes, so its variance is
+    # huge and non-stationary; the value head could not track it (explained
+    # variance stuck near 0.06-0.10). VecNormalize rescales rewards by a
+    # discounted running standard deviation, giving the critic a roughly
+    # unit-variance target. norm_obs stays False: the observation is already
+    # bounded and physically meaningful, and the hard rules forbid normalising
+    # it. clip_reward bounds the normalised signal so one terminal step cannot
+    # dominate an update. gamma must equal the agent's gamma for the discounted
+    # return statistic to be consistent.
+    gamma = float(tcfg["gamma"])
+    train_env = VecNormalize(
+        train_env,
+        norm_obs=False,
+        norm_reward=True,
+        clip_reward=10.0,
+        gamma=gamma,
+    )
+    # The eval env must be wrapped the same way: with a VecNormalize training
+    # env, EvalCallback calls sync_envs_normalization, which asserts the eval env
+    # is also VecNormalize. Evaluation reports true (un-normalised) rewards and
+    # never updates the running statistics.
+    eval_env = VecNormalize(
+        eval_env,
+        norm_obs=False,
+        norm_reward=False,
+        clip_reward=10.0,
+        gamma=gamma,
+    )
+    eval_env.training = False
+    eval_env.norm_reward = False
+
     # Curriculum + callbacks. In tuning mode the curriculum is frozen: a single
     # stage scheduler is final from the start, so update() never advances and the
     # env stays at the tuning stage for the whole diagnostic run. The thresholds
@@ -219,6 +256,11 @@ def train(args: argparse.Namespace) -> pathlib.Path:
         n_epochs=int(tcfg["n_epochs"]),
         learning_rate=float(tcfg["learning_rate"]),
         clip_range=float(tcfg["clip_range"]),
+        gamma=gamma,
+        # Standardise the advantage per minibatch. This is RecurrentPPO's default;
+        # made explicit because it works with VecNormalize reward scaling to keep
+        # the policy-gradient signal well conditioned.
+        normalize_advantage=True,
         # RecurrentPPO does not accept a callable schedule for ent_coef (it would
         # break at the first update with function * Tensor). Pass a fixed float
         # and decay it at runtime via EntropyDecayCallback below.
@@ -247,7 +289,13 @@ def train(args: argparse.Namespace) -> pathlib.Path:
             progress_bar=False,
         )
     finally:
-        # Always persist the final model, even on KeyboardInterrupt.
+        # Always persist the VecNormalize stats and the final model together,
+        # even on KeyboardInterrupt. eval must load these stats from the same
+        # directory, so they are written before closing the envs.
+        vec_normalize_path = os.path.join(run_dir, "vec_normalize.pkl")
+        train_env.save(vec_normalize_path)
+        print(f"[train] saved VecNormalize stats to {vec_normalize_path}")
+
         final_path = run_dir / "final_model.zip"
         model.save(final_path)
         print(f"[train] saved final model to {final_path}")

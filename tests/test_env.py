@@ -339,6 +339,26 @@ def test_tuning_range_override(noiseless_config):
         assert 270.0 <= r_obs <= 330.0
 
 
+def test_eval_stage_flag(config):
+    """eval.py must route its --stage flag straight to InterceptEnv.
+
+    Guards the regression where eval defaulted to the final stage: the CLI
+    default is 1, and build_eval_env (the single place the stage reaches the env)
+    must construct an InterceptEnv whose curriculum_stage equals the requested
+    stage for both an easy (1) and the hardest (3) stage.
+    """
+    from eval.eval import build_eval_env, parse_args
+
+    # CLI default stage is 1 (not the final stage); --stage overrides it.
+    assert parse_args(["--model", "x.zip"]).stage == 1
+    assert parse_args(["--model", "x.zip", "--stage", "3"]).stage == 3
+
+    for stage in (1, 3):
+        env = build_eval_env(config, stage=stage, seed=0)
+        assert env.curriculum_stage == stage
+        env.close()
+
+
 def test_no_render_in_step(config):
     """With render_mode=None, stepping must never create a matplotlib figure."""
     import matplotlib

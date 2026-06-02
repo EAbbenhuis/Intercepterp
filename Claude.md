@@ -289,6 +289,59 @@ Append a new entry after every Claude Code session.
   expected constants track config and must be updated again if the reward block
   changes. All 19 tests pass.
 
+## 2026-06-02 (VecNormalize reward scaling + eval --stage VecNormalize load)
+- Two issues from the 300k training logs: (1) the critic could not learn,
+  explained_variance stuck at 0.06-0.10 and value_loss barely moving, because the
+  raw reward mixes a dense bearing penalty and closing bonus with +/-100 terminal
+  spikes, so the value target had huge non-stationary variance; (2) eval needed
+  to load reward-normalisation stats and the --stage flag had to route to the env.
+  No reward values, kinematics, sensor model, observation space, or curriculum
+  logic were changed.
+- config/defaults.yaml: added training.gamma 0.99. This is RecurrentPPO's existing
+  default (behaviour unchanged) but is now a single config value, read once and
+  shared by both RecurrentPPO and VecNormalize so the discounted-return statistic
+  can never silently desync from the agent's gamma. Honours the no-hardcoding rule
+  rather than literally hardcoding 0.99 in three places.
+- training/train.py: wrapped the training VecEnv in VecNormalize(norm_obs=False,
+  norm_reward=True, clip_reward=10.0, gamma=gamma) before passing it to
+  RecurrentPPO. norm_obs stays False (hard rule: the observation is already
+  bounded and meaningful). norm_reward rescales the reward by a discounted running
+  std so the critic sees a roughly unit-variance target; clip_reward bounds the
+  normalised signal so a single +/-100 terminal step cannot dominate an update.
+  The eval VecEnv is also wrapped in VecNormalize but with norm_reward=False and
+  training=False (true rewards, no stat updates): this is REQUIRED, not optional,
+  because with a VecNormalize training env SB3's EvalCallback calls
+  sync_envs_normalization, which asserts the eval env is also a VecNormalize
+  (verified against sb3 2.7.1 source). normalize_advantage=True and gamma=gamma
+  were made explicit on RecurrentPPO (both already its defaults).
+- training/train.py finally block: saves vec_normalize.pkl next to the model
+  (train_env.save) before final_model.zip and before closing the envs, so the
+  stats are persisted even on KeyboardInterrupt and always travel with the model.
+- eval/eval.py: added build_eval_env(config, stage, seed) as the single seam that
+  routes --stage into InterceptEnv, and load_obs_normalizer(model_dir, config)
+  which loads a sibling vec_normalize.pkl (training=False, norm_reward=False) and
+  returns its normalize_obs; run_episode applies that map to obs before predict.
+  Under norm_obs=False this map is the identity, so it is functionally a no-op for
+  the current configuration, but it keeps eval correct if observation
+  normalisation is ever enabled and makes the load explicit per the task. When no
+  vec_normalize.pkl exists (older runs) it falls back to an identity map, so eval
+  stays backward compatible. Rewards are never normalised at eval time: metrics
+  come from the env's true reward and info dict.
+- The eval rollout deliberately stays on the single gymnasium InterceptEnv (not a
+  stepped VecEnv): it threads the LSTM state and reads the rich per-step info dict
+  (bearing_true, termination_reason, t), which a VecEnv's auto-reset would
+  obscure. VecNormalize is used only as a stateless obs transformer.
+- tests/test_env.py: added test_eval_stage_flag. It asserts parse_args defaults
+  --stage to 1 and parses --stage 3 to 3, and that build_eval_env(stage=1/3)
+  constructs an InterceptEnv whose curriculum_stage matches. All 20 tests pass.
+- Verified end to end: a 2000-step run trained with both envs VecNormalize-wrapped
+  (EvalCallback fired without the sync assertion, vec_normalize.pkl written), then
+  eval loaded the stats and ran; eval also ran correctly with the pkl removed.
+- KAGGLE NOTE: vec_normalize.pkl must always be saved alongside the model zips and
+  downloaded together from Kaggle. best_model.zip / final_model.zip are incomplete
+  without the matching vec_normalize.pkl from the same run directory; eval looks
+  for it next to the model and silently falls back to identity if it is missing.
+
 ---
 
 ## Physics constants (quick reference)
