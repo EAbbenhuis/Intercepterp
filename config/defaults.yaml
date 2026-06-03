@@ -42,13 +42,13 @@ ekf:
   q_r:       1.0     # process noise, range
 
 reward:
-  bearing_penalty:      0.01     # was 0.003 — increase 3x for stronger centering signal
-  approach_reward:      0.005    # unchanged
-  fov_soft_limit_deg:   15.0     # was 20.0 — tighter soft limit, earlier warning
-  fov_edge_penalty:     0.10     # was 0.05 — stronger edge push
-  success:              100.0
-  fov_loss:            -100.0
-  timeout:             -50.0
+  bearing_penalty:      0.5      # was 0.01 — must dominate at typical angles
+  approach_reward:      0.3      # was 0.005 — must give meaningful signal
+  fov_soft_limit_deg:   15.0     # unchanged
+  fov_edge_penalty:     2.0      # was 0.1 — must strongly punish edge approach
+  success:              100.0    # unchanged
+  fov_loss:            -100.0    # unchanged
+  timeout:             -50.0     # unchanged
 
 training:
   total_timesteps:   5_000_000  # unchanged, production value
