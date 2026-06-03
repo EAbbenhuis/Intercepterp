@@ -31,7 +31,7 @@ intruder:
 init:
   range_mean:        1000.0    # m
   range_std:         100.0     # m
-  bearing_offset_max: 5.0      # deg
+  bearing_offset_max: 25.0     # was 5.0; 5 deg let a zero-action policy score ~38%
 
 sensor:
   bearing_noise_std: 0.5       # deg
