@@ -26,7 +26,7 @@ import argparse
 
 import numpy as np
 import yaml
-from sb3_contrib import RecurrentPPO
+from stable_baselines3 import PPO
 
 from envs.intercept_env import ActionConfig, InterceptEnv
 
@@ -71,15 +71,10 @@ def rollout(model, env: InterceptEnv, seed: int, deterministic: bool) -> dict:
         "range": [info["range"]],
     }
 
-    lstm_states = None
-    episode_start = np.array([True])
     done = False
     while not done:
-        action, lstm_states = model.predict(
-            obs, state=lstm_states, episode_start=episode_start, deterministic=deterministic
-        )
+        action, _ = model.predict(obs, deterministic=deterministic)
         obs, _, terminated, truncated, info = env.step(action)
-        episode_start = np.array([False])
         done = terminated or truncated
 
         rec["t"].append(info["t"])
@@ -198,7 +193,7 @@ def main(args: argparse.Namespace) -> None:
     stage = args.stage or len(config["curriculum"]["thresholds"])
     print(f"[replay] run={run_dir}  model={model_path.name}  stage={stage}  episode(seed)={args.episode}")
 
-    model = RecurrentPPO.load(str(model_path), device="cpu")
+    model = PPO.load(str(model_path), device="cpu")
     env = InterceptEnv(config, ActionConfig(), curriculum_stage=stage, render_mode=None)
     rec = rollout(model, env, seed=args.episode, deterministic=not args.stochastic)
     env.close()

@@ -4,9 +4,9 @@ Usage:
     python eval/eval.py --model runs/latest/best_model.zip --n-eps 100
     python eval/eval.py --model runs/20260602_143200/best_model.zip --stage 3
 
-Runs N independent episodes with the recurrent policy (LSTM state threaded
-manually), aggregates with eval.metrics.compute_metrics, and writes the result
-next to the model (spec section 8).
+Runs N independent episodes with the MLP policy, aggregates with
+eval.metrics.compute_metrics, and writes the result next to the model
+(spec section 8).
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ import json
 
 import numpy as np
 import yaml
-from sb3_contrib import RecurrentPPO
+from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from envs.intercept_env import ActionConfig, InterceptEnv
@@ -65,8 +65,8 @@ def build_eval_env(config: dict, stage: int, seed: int) -> InterceptEnv:
 
     A single factory so the stage flows to exactly one place (and so tests can
     assert the stage reaches the env). Kept as a plain gymnasium env, not a
-    VecEnv: the recurrent rollout below threads the LSTM state and reads the rich
-    per-step info dict, which the gymnasium API exposes directly.
+    VecEnv: the rollout below reads the rich per-step info dict, which the
+    gymnasium API exposes directly.
     """
     return InterceptEnv(
         config, ActionConfig(), curriculum_stage=stage, rng_seed=seed
@@ -107,23 +107,18 @@ def run_episode(
 ) -> dict:
     """Roll out one episode and return its summary dict for metrics."""
     obs, info = env.reset()
-    lstm_states = None
-    episode_start = np.array([True])
     bearing_sum = 0.0
     steps = 0
     done = False
 
     while not done:
-        action, lstm_states = model.predict(
+        action, _ = model.predict(
             normalize_obs(obs),
-            state=lstm_states,
-            episode_start=episode_start,
             deterministic=deterministic,
         )
         obs, _, terminated, truncated, info = env.step(action)
         bearing_sum += abs(float(info["bearing_true"]))
         steps += 1
-        episode_start = np.array([False])
         done = terminated or truncated
 
     return {
@@ -147,7 +142,7 @@ def evaluate(args: argparse.Namespace) -> dict:
     print(f"[eval] model = {model_path}")
     print(f"[eval] stage = {stage}   n_eps = {args.n_eps}   deterministic = {not args.stochastic}")
 
-    model = RecurrentPPO.load(str(model_path), device=args.device)
+    model = PPO.load(str(model_path), device=args.device)
     env = build_eval_env(config, stage, args.seed)
     # If the run saved VecNormalize stats, load them so the policy sees the same
     # observation distribution it trained on (identity under norm_obs=False).

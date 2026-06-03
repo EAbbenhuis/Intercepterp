@@ -1,9 +1,14 @@
 """InterceptEnv: the main Gymnasium environment for Intercepterp.
 
-A 2D bearing-only pursuit-evasion task. The interceptor sees a 3-dim noisy
-observation (bearing, range, own heading) and outputs a normalized turn-rate
-action in [-1, 1]. The episode ends on detonation (success), FOV loss, or
-timeout. See INTERCEPTERP_SPEC.md sections 4.1 and 4.6.
+A 2D bearing-only pursuit-evasion task. The interceptor sees a 5-dim EKF
+observation (estimated bearing, bearing rate, range, range rate, own heading)
+and outputs a normalized turn-rate action in [-1, 1]. The episode ends on
+detonation (success), FOV loss, or timeout. See INTERCEPTERP_SPEC.md sections
+4.1 and 4.6.
+
+The EKF (in SensorModel.observe_full) supplies the bearing- and range-rate
+estimates directly, so the observation is fully observable and an MLP policy
+suffices; the recurrent network the task used previously is no longer needed.
 
 Unit policy: every value stored on this env and passed to the agents/sensor is
 SI (m, s, rad). The only place degrees appear is the config dict, which this
@@ -22,8 +27,12 @@ from envs.base_env import BaseEnv, wrap_to_pi
 from envs.sensor import SensorModel
 
 # Upper bound of the reported range observation, metres. Generous relative to
-# the ~1 km spawn range so the noisy estimate never saturates in normal play.
+# the ~1 km spawn range so the EKF estimate never saturates in normal play.
 _OBS_RANGE_MAX = 5000.0
+# Bound of the reported range-rate estimate, m/s. The physical closing speed is
+# at most interceptor + intruder speed (~128 m/s); 500 leaves ample headroom for
+# EKF transients while keeping the observation Box finite.
+_OBS_RDOT_MAX = 500.0
 
 
 @dataclass
@@ -103,18 +112,27 @@ class InterceptEnv(BaseEnv):
         )
 
         sens = config["sensor"]
+        ekf = config["ekf"]
         self.sensor = SensorModel(
             bearing_noise_std=np.radians(float(sens["bearing_noise_std"])),
             range_noise_frac=float(sens["range_noise_frac"]),
             fov_half_angle=self.fov_half_angle,
+            dt=self.dt,
+            ekf_q_theta=float(ekf["q_theta"]),
+            ekf_q_r=float(ekf["q_r"]),
         )
 
         # --- Spaces. ---
-        # Observation: [theta_obs in [-pi, pi], r_obs in [0, RANGE_MAX],
-        #               phi_self in [-pi, pi]], float32.
+        # Observation (EKF estimate): [theta_hat in [-pi, pi],
+        #   theta_dot_hat in [-pi, pi], r_hat in [0, RANGE_MAX],
+        #   r_dot_hat in [-RDOT_MAX, RDOT_MAX], phi_self in [-pi, pi]], float32.
         self.observation_space = gymnasium.spaces.Box(
-            low=np.array([-np.pi, 0.0, -np.pi], dtype=np.float32),
-            high=np.array([np.pi, _OBS_RANGE_MAX, np.pi], dtype=np.float32),
+            low=np.array(
+                [-np.pi, -np.pi, 0.0, -_OBS_RDOT_MAX, -np.pi], dtype=np.float32
+            ),
+            high=np.array(
+                [np.pi, np.pi, _OBS_RANGE_MAX, _OBS_RDOT_MAX, np.pi], dtype=np.float32
+            ),
             dtype=np.float32,
         )
         # Action: always [-1, 1], shape (action_config.dim,). The env scales to
@@ -128,15 +146,14 @@ class InterceptEnv(BaseEnv):
 
         # --- Episode state, populated in reset(). ---
         self.t = 0.0
-        self.range = float("inf")
+        # True range, metres. Named current_range because the reward and
+        # termination checks read the true (not estimated) range each step.
+        self.current_range = float("inf")
         self.in_fov = True
         self.termination_reason = ""
-        self._last_obs = np.zeros(3, dtype=np.float32)
-        # Observed (noisy) range at the previous and current step, metres. Used
-        # by the closing reward so the agent is paid for shrinking the estimated
-        # range. Both initialised in reset() to the initial observed range.
-        self.prev_r_obs = 0.0
-        self.current_r_obs = 0.0
+        # Most recent 5-dim EKF observation (clipped to the observation Box).
+        # _compute_reward reads it directly so it never recomputes the estimate.
+        self.last_obs = np.zeros(5, dtype=np.float32)
 
         # Trajectory buffers for rendering. Only populated when rendering, to
         # keep training (render_mode=None) free of this overhead.
@@ -168,21 +185,24 @@ class InterceptEnv(BaseEnv):
         self.t = 0.0
         self.termination_reason = ""
 
-        # Initial observation. The interceptor points at the intruder, so the
-        # target starts inside the FOV.
-        obs, in_fov = self.sensor.observe(
+        # Seed the EKF with the spawn geometry before the first estimate, so the
+        # filter starts from the true bearing/range rather than a zero prior.
+        self.sensor.reset_filter(
             self.interceptor.get_state(),
             self.intruder.get_state(),
             self.np_random,
         )
-        self.range = self.sensor.last_true_range
-        self.in_fov = in_fov
-        self._last_obs = self._clip_obs(obs)
 
-        # Seed the closing-reward baseline with the initial observed range, so the
-        # first step's closing reward measures the change from t = 0.
-        self.prev_r_obs = float(obs[1])
-        self.current_r_obs = float(obs[1])
+        # Initial observation. The interceptor points at the intruder, so the
+        # target starts inside the FOV.
+        obs, in_fov = self.sensor.observe_full(
+            self.interceptor.get_state(),
+            self.intruder.get_state(),
+            self.np_random,
+        )
+        self.current_range = self.sensor.last_true_range
+        self.in_fov = in_fov
+        self.last_obs = self._clip_obs(obs)
 
         if self.render_mode == "rgb_array":
             self._traj_interceptor = [(self.interceptor.x, self.interceptor.y)]
@@ -204,11 +224,11 @@ class InterceptEnv(BaseEnv):
         #       matplotlib runs on the training path.
         #   (b) Disk I/O: step() writes nothing to disk. The only JSON/file writes
         #       are in callbacks.py, fired on episode-end events, not per step.
-        #   (c) NumPy: observe() and the Dubins updates in intruder.py/
-        #       interceptor.py use scalar numpy or plain math; the single array
-        #       built per step is the fixed 3-element obs vector. There is no
-        #       per-step list-to-array conversion of data and no Python loop over
-        #       arrays where a vectorised op would serve.
+        #   (c) NumPy: observe_full() and the Dubins updates in intruder.py/
+        #       interceptor.py use scalar numpy or plain math plus one small EKF
+        #       4x4 cycle; the single array built per step is the fixed 5-element
+        #       obs vector. There is no per-step list-to-array conversion of data
+        #       and no Python loop over arrays where a vectorised op would serve.
         action = np.asarray(action, dtype=np.float32).reshape(-1)
 
         # 1. Move the interceptor (action is normalized; scaled internally).
@@ -217,22 +237,17 @@ class InterceptEnv(BaseEnv):
         self.intruder.step(self.dt, interceptor_state=self.interceptor.get_state())
         # advance time before observing/rewarding so the timeout check is current
         self.t += self.dt
-        # 3. Observe through the sensor.
-        obs, in_fov = self.sensor.observe(
+        # 3. Observe through the sensor + EKF.
+        obs, in_fov = self.sensor.observe_full(
             self.interceptor.get_state(),
             self.intruder.get_state(),
             self.np_random,
         )
-        self.range = self.sensor.last_true_range
+        self.current_range = self.sensor.last_true_range
         self.in_fov = in_fov
-        self._last_obs = self._clip_obs(obs)
+        self.last_obs = self._clip_obs(obs)
 
-        # Roll the observed-range window forward before rewarding: prev_r_obs is
-        # last step's observed range, current_r_obs is this step's.
-        self.prev_r_obs = self.current_r_obs
-        self.current_r_obs = float(obs[1])
-
-        # 4 + 5. Reward and termination.
+        # 4 + 5. Reward and termination (reads self.last_obs and self.in_fov).
         reward, terminated, truncated = self._compute_reward()
 
         if self.render_mode == "rgb_array":
@@ -251,7 +266,7 @@ class InterceptEnv(BaseEnv):
 
     def _get_obs(self) -> np.ndarray:
         """Return the most recent observation (built in reset/step)."""
-        return self._last_obs
+        return self.last_obs
 
     def _get_info(self) -> dict:
         """Auxiliary diagnostics. Not used by the policy; consumed by eval/viz.
@@ -260,7 +275,7 @@ class InterceptEnv(BaseEnv):
         """
         return {
             "t": self.t,
-            "range": self.range,
+            "range": self.current_range,
             "bearing_obs": self.sensor.last_bearing,
             "bearing_true": self.sensor.last_true_bearing,
             "in_fov": self.in_fov,
@@ -274,25 +289,45 @@ class InterceptEnv(BaseEnv):
     def _compute_reward(self) -> tuple[float, bool, bool]:
         """Return (reward, terminated, truncated) for the current state.
 
-        Reward v2 (loitering fix). The per-step penalty uses the NOISY observed
-        bearing (sensor.last_bearing == theta_obs), per spec section 5, with a
-        halved coefficient to weaken the loitering incentive. A closing reward
-        pays for shrinking the observed range, so absorbing the (now hardened)
-        timeout penalty by orbiting at fixed range is no longer an equilibrium.
+        Reward v4 (EKF + quadratic shaping). The step reward is built from the
+        EKF estimate stored in self.last_obs:
+          - a quadratic bearing penalty -w * theta^2, mild near boresight and
+            steep toward the edge (replaces the old linear penalty);
+          - an approach reward paid for estimated closing speed (max(0, -r_dot)),
+            never penalising opening, so the agent is rewarded for actually
+            reducing range rather than orbiting;
+          - a quadratic FOV soft-buffer penalty that activates only outside the
+            soft limit, pushing the policy to keep the target away from the hard
+            FOV edge before it is lost.
         Priority is success, then FOV loss, then timeout: detonation always wins.
         The termination_reason assignments are retained because eval, the info
         dict, and the curriculum's is_success flag all read them.
         """
-        # Bearing penalty (halved)
-        r_step = -self.config["reward"]["bearing_penalty"] * abs(self.sensor.last_bearing)
+        theta = self.last_obs[0]      # EKF theta_hat
+        theta_dot = self.last_obs[1]  # EKF theta_dot_hat (unused here; available)
+        r = self.current_range        # true range for termination checks
+        r_dot_hat = self.last_obs[3]  # EKF r_dot_hat
 
-        # Closing reward: only reward range decrease, never penalise increase
-        # Uses noisy r_obs consistent with GPS-denied sensor model
-        closing = max(0.0, self.prev_r_obs - self.current_r_obs)
-        r_step += self.config["reward"]["closing_reward"] * closing
+        fov_soft_limit = np.deg2rad(self.config["reward"]["fov_soft_limit_deg"])
+
+        # Quadratic bearing penalty (replaces linear)
+        r_bearing = -self.config["reward"]["bearing_penalty"] * theta ** 2
+
+        # Approach reward: reward closing speed, never penalise opening
+        r_approach = self.config["reward"]["approach_reward"] * max(0.0, -r_dot_hat)
+
+        # FOV soft buffer: quadratic penalty outside the soft limit
+        abs_theta = abs(theta)
+        if abs_theta > fov_soft_limit:
+            excess = abs_theta - fov_soft_limit
+            r_edge = -self.config["reward"]["fov_edge_penalty"] * (excess ** 2)
+        else:
+            r_edge = 0.0
+
+        r_step = float(r_bearing + r_approach + r_edge)
 
         # Terminal conditions
-        if self.range < self.config["physics"]["blast_radius"]:
+        if r < self.config["physics"]["blast_radius"]:
             self.termination_reason = "success"
             return r_step + self.config["reward"]["success"], True, False
 
@@ -370,7 +405,7 @@ class InterceptEnv(BaseEnv):
         ax.set_aspect("equal", adjustable="datalim")
         ax.set_xlabel("x [m]")
         ax.set_ylabel("y [m]")
-        ax.set_title(f"t = {self.t:5.2f} s    range = {self.range:7.1f} m")
+        ax.set_title(f"t = {self.t:5.2f} s    range = {self.current_range:7.1f} m")
         ax.legend(loc="upper right", fontsize=8)
         ax.grid(True, alpha=0.3)
 
