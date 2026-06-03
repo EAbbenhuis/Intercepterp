@@ -426,6 +426,46 @@ Append a new entry after every Claude Code session.
   eval_results.json end to end. The zero-action baseline at 25 deg offset is
   0/50 = 0.000 (well under the 0.20 floor), confirming the task is non-trivial.
 
+## 2026-06-03 (reward v5: bearing-rate penalty)
+- Reward change only. Kinematics, EKF, observation space, curriculum, and the
+  VecNormalize setup were all left untouched. The reward now has two terms:
+  bearing_rate_penalty (primary) and bearing_penalty (secondary).
+    - bearing_rate_penalty (alpha = 0.667) is the primary term. A constant
+      line-of-sight bearing is the signature of a lead-pursuit collision course,
+      so penalising the EKF bearing-rate estimate |theta_dot| teaches the policy
+      to hold the target on a fixed bearing and fly a collision course rather
+      than a tail chase. The calculated alpha = 0.667 gives a 23-point cumulative
+      advantage to a collision course over pure pursuit.
+    - bearing_penalty (beta = 0.022) is the secondary term: a soft FOV constraint
+      that keeps the target near boresight without dominating the rate term.
+- config/defaults.yaml: replaced the entire reward block. New keys
+  bearing_rate_penalty 0.667 and bearing_penalty 0.022; success/fov_loss/timeout
+  unchanged at 100/-100/-50. Removed approach_reward, fov_soft_limit_deg, and
+  fov_edge_penalty (the v4 quadratic/approach/edge shaping).
+- envs/intercept_env.py: _compute_reward step reward is now
+  r_step = -alpha*|theta_dot| - beta*|theta|, read straight from
+  self.last_obs (theta_hat, theta_dot_hat). Terminal priority is unchanged
+  (success > FOV loss > timeout). Decision: the termination_reason assignments
+  (omitted by the literal patch snippet) were retained because eval, the info
+  dict, and the curriculum is_success flag all read them; dropping them would
+  silently break curriculum advancement (a hard rule). The __init__ reward-weight
+  caches were renamed to match the new formula: self.alpha now caches
+  bearing_rate_penalty (primary) and self.beta caches bearing_penalty
+  (secondary); both are still read directly from config inside _compute_reward,
+  so the caches are introspection-only.
+- tests/test_env.py: removed test_reward_values_exact,
+  test_bearing_penalty_quadratic, and test_fov_edge_penalty (all keyed to the v4
+  approach/edge/quadratic shaping that no longer exists). Updated
+  test_reward_constants_match_spec to the v5 constants and added an absence guard
+  so the removed v4 keys cannot silently reappear. Added test_bearing_rate_reward
+  (asserts the two-term decomposition, both terms non-positive, rate term
+  dominant) and test_collision_course_better_than_pursuit (20 zero-action steps
+  from a head-on collision course vs a tail chase; cumulative reward is strictly
+  higher for the collision course). All 22 tests pass.
+- Validation: 22/22 tests pass. The three termination tests still hold within
+  their +-5 tolerance because the v5 step shaping near a terminal state is small
+  (the EKF bearing-rate kick from a re-seeded filter is ~0.05 rad/s).
+
 ---
 
 ## Physics constants (quick reference)
