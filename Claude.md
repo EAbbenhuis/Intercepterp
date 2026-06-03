@@ -342,6 +342,29 @@ Append a new entry after every Claude Code session.
   without the matching vec_normalize.pkl from the same run directory; eval looks
   for it next to the model and silently falls back to identity if it is missing.
 
+## 2026-06-03 (init.bearing_offset_max 5 -> 25 deg: trivial-task fix)
+- Single config change: init.bearing_offset_max 5.0 -> 25.0 deg. Nothing else
+  touched (no code, env, reward, sensor, or curriculum changes).
+- Why: the interceptor spawns aimed at the intruder with a random bearing offset
+  drawn from +-bearing_offset_max. At 5 deg the target starts almost dead ahead,
+  and because the interceptor (78 m/s) is much faster than the intruder (50 m/s)
+  and spawns pointed at it, simply flying straight (the zero action) closes the
+  range and detonates on a large fraction of episodes. A zero-action policy scored
+  about 38% intercepts, so the task was close to trivial and the agent was never
+  forced to learn to steer from bearing. Every previous training result is
+  therefore meaningless as evidence of a learned bearing-only policy: most of the
+  reported intercept rate was just the geometry of an easy spawn, not control.
+- Widening the offset to +-25 deg places the target well off-boresight at spawn
+  (but still inside the 30 deg FOV half-angle, so it remains initially visible and
+  the episode is solvable), so a straight-line policy now loses the target or
+  times out and the agent must actually turn toward the bearing to intercept. This
+  restores the bearing-only learning signal the benchmark is supposed to measure.
+- 25 deg leaves a 5 deg margin to the FOV edge, so the spawn is in view but the
+  zero-action baseline is no longer a near-free win. Re-baseline before trusting
+  any new run: measure the zero-action intercept rate at the new offset and treat
+  it as the floor any learned policy must clear.
+- tests/test_env.py: unchanged; no test pins bearing_offset_max, all 20 pass.
+
 ---
 
 ## Physics constants (quick reference)
@@ -356,4 +379,4 @@ Append a new entry after every Claude Code session.
 | dt                    | 0.05 s    |
 | Episode timeout       | 30 s      |
 | Lock-on range         | 1000 m +- 100 m |
-| Lock-on bearing offset| +-5 deg   |
+| Lock-on bearing offset| +-25 deg  |
