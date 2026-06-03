@@ -1,8 +1,9 @@
-"""PPO + LSTM training entry point for Intercepterp.
+"""PPO (MLP) training entry point for Intercepterp.
 
-Trains a RecurrentPPO (sb3-contrib) policy on InterceptEnv with a difficulty
-curriculum. The LSTM lets the agent integrate the noisy bearing/range history,
-which is what makes a bearing-only intercept tractable.
+Trains a Stable-Baselines3 PPO policy with an MLP on InterceptEnv with a
+difficulty curriculum. The EKF in the sensor supplies bearing rate and range
+rate directly, so the observation is fully observable and a feedforward policy
+suffices; the recurrent network used previously is no longer needed.
 
 Usage:
     python training/train.py
@@ -29,7 +30,7 @@ import shutil
 
 import torch
 import yaml
-from sb3_contrib import RecurrentPPO
+from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import (
     DummyVecEnv,
@@ -39,7 +40,7 @@ from stable_baselines3.common.vec_env import (
 )
 
 from envs.intercept_env import ActionConfig, InterceptEnv
-from training.callbacks import EntropyDecayCallback, build_callbacks
+from training.callbacks import build_callbacks
 from training.curriculum import CurriculumScheduler
 
 ON_KAGGLE = os.path.exists("/kaggle/working")
@@ -243,49 +244,35 @@ def train(args: argparse.Namespace) -> pathlib.Path:
         verbose=1,
     )
 
-    # Model: RecurrentPPO with an LSTM-augmented MLP policy.
-    policy_kwargs = dict(
-        lstm_hidden_size=int(tcfg["lstm_hidden_size"]),
-        n_lstm_layers=int(tcfg["lstm_n_layers"]),
-    )
-    model = RecurrentPPO(
-        "MlpLstmPolicy",
+    # Model: PPO with a feedforward MLP policy. The EKF observation is fully
+    # observable, so no recurrence is needed; a fixed entropy coefficient is
+    # enough without the recurrent-specific entropy-decay callback.
+    model = PPO(
+        "MlpPolicy",
         train_env,
+        learning_rate=float(tcfg["learning_rate"]),
         n_steps=int(tcfg["n_steps"]),
         batch_size=int(tcfg["batch_size"]),
         n_epochs=int(tcfg["n_epochs"]),
-        learning_rate=float(tcfg["learning_rate"]),
         clip_range=float(tcfg["clip_range"]),
-        gamma=gamma,
-        # Standardise the advantage per minibatch. This is RecurrentPPO's default;
-        # made explicit because it works with VecNormalize reward scaling to keep
-        # the policy-gradient signal well conditioned.
-        normalize_advantage=True,
-        # RecurrentPPO does not accept a callable schedule for ent_coef (it would
-        # break at the first update with function * Tensor). Pass a fixed float
-        # and decay it at runtime via EntropyDecayCallback below.
         ent_coef=0.01,
-        policy_kwargs=policy_kwargs,
-        tensorboard_log=str(run_dir / "tensorboard"),
-        seed=args.seed,
+        # Standardise the advantage per minibatch (PPO's default; made explicit
+        # because it works with VecNormalize reward scaling to keep the
+        # policy-gradient signal well conditioned).
+        normalize_advantage=True,
+        # gamma must match the VecNormalize gamma so the discounted-return
+        # statistic stays consistent with the agent's discounting.
+        gamma=gamma,
         device=device,
         verbose=1,
-    )
-
-    # Entropy decay: linearly anneal ent_coef 0.02 -> 0.001 over the first 60% of
-    # training, then hold. total_timesteps is the resolved value (tuning or
-    # production), so the decay stays proportional in both modes.
-    entropy_cb = EntropyDecayCallback(
-        initial_value=0.02,
-        final_value=0.001,
-        end_fraction=0.6,
-        total_timesteps=total_timesteps,
+        tensorboard_log=str(run_dir / "tensorboard"),
+        seed=args.seed,
     )
 
     try:
         model.learn(
             total_timesteps=total_timesteps,
-            callback=[callbacks, entropy_cb],
+            callback=callbacks,
             progress_bar=False,
         )
     finally:
@@ -315,7 +302,7 @@ def train(args: argparse.Namespace) -> pathlib.Path:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train Intercepterp PPO+LSTM policy.")
+    p = argparse.ArgumentParser(description="Train Intercepterp PPO (MLP) policy.")
     p.add_argument("--config", default=str(_ROOT / "config" / "defaults.yaml"))
     p.add_argument("--timesteps", type=int, default=None,
                    help="override training.total_timesteps")

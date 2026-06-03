@@ -3,9 +3,8 @@
 Exposes two callbacks (spec: training/callbacks.py contains EvalCallback and
 CurriculumCallback):
 
-  - EvalCallback: re-exported from Stable-Baselines3. It already supports the
-    recurrent policy used here (evaluate_policy threads the LSTM state and
-    episode_start through model.predict), and saves best_model.zip to the run.
+  - EvalCallback: re-exported from Stable-Baselines3. It evaluates the MLP
+    policy used here and saves best_model.zip to the run.
   - CurriculumCallback: feeds episode outcomes to the CurriculumScheduler,
     pushes any stage change into the live training (and eval) envs via set_attr,
     logs curriculum metrics, and writes a small JSON file that the dashboard
@@ -28,7 +27,6 @@ from training.curriculum import CurriculumScheduler
 __all__ = [
     "EvalCallback",
     "CurriculumCallback",
-    "EntropyDecayCallback",
     "build_callbacks",
 ]
 
@@ -161,40 +159,6 @@ class CurriculumCallback(BaseCallback):
         except OSError:
             # Dashboard output is best-effort; never let it break training.
             pass
-
-
-class EntropyDecayCallback(BaseCallback):
-    """
-    Linearly decays ent_coef from initial_value to final_value
-    over the first end_fraction of training.
-    After end_fraction of total timesteps, ent_coef is fixed at final_value.
-    """
-
-    def __init__(
-        self,
-        initial_value: float = 0.02,
-        final_value: float = 0.001,
-        end_fraction: float = 0.6,
-        total_timesteps: int = 300_000,
-        verbose: int = 0,
-    ):
-        super().__init__(verbose)
-        self.initial_value = initial_value
-        self.final_value = final_value
-        self.end_fraction = end_fraction
-        self.total_timesteps = total_timesteps
-
-    def _on_step(self) -> bool:
-        fraction_done = self.num_timesteps / self.total_timesteps
-        if fraction_done < self.end_fraction:
-            current = self.initial_value + (
-                (self.final_value - self.initial_value)
-                * (fraction_done / self.end_fraction)
-            )
-        else:
-            current = self.final_value
-        self.model.ent_coef = current
-        return True
 
 
 def build_callbacks(

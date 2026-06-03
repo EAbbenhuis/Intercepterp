@@ -42,9 +42,9 @@ intercepterp/
 │   ├── agents/
 │   │   ├── intruder.py         # Intruder: Dubins + curriculum evasion
 │   │   └── interceptor.py      # Interceptor: Dubins + apply_action()
-│   └── sensor.py               # SensorModel: bearing + range + FOV gate
+│   └── sensor.py               # SensorModel: bearing + range + FOV gate + EKF
 ├── training/
-│   ├── train.py                # PPO+LSTM entry point
+│   ├── train.py                # PPO (MLP) entry point
 │   ├── curriculum.py           # CurriculumScheduler
 │   └── callbacks.py            # EvalCallback, CurriculumCallback
 ├── eval/
@@ -62,12 +62,18 @@ intercepterp/
 
 ## Key interfaces (never break these)
 
-### Observation vector — shape (3,) float32
-| Index | Variable  | Units | Noise                    |
-|-------|-----------|-------|--------------------------|
-| 0     | theta_obs | rad   | N(0, 0.5 deg) additive   |
-| 1     | r_obs     | m     | N(0, 0.05 * r) scaled    |
-| 2     | phi_self  | rad   | noiseless                |
+### Observation vector — shape (5,) float32 (EKF estimate, since 2026-06-03 v4)
+| Index | Variable      | Units | Source                              |
+|-------|---------------|-------|-------------------------------------|
+| 0     | theta_hat     | rad   | EKF estimate of bearing             |
+| 1     | theta_dot_hat | rad/s | EKF estimate of bearing rate        |
+| 2     | r_hat         | m     | EKF estimate of range               |
+| 3     | r_dot_hat     | m/s   | EKF estimate of range rate          |
+| 4     | phi_self      | rad   | own heading, noiseless              |
+
+The EKF (RelativeEKF in sensor.py) consumes the noisy bearing N(0, 0.5 deg) and
+range N(0, 0.05 * r) measurements. The legacy 3-dim observe() (theta_obs, r_obs,
+phi_self) is retained for backward compatibility.
 
 ### Action vector — shape (1,) float32, bounds [-1, 1]
 | Index | Variable   | Physical meaning            |
@@ -77,25 +83,29 @@ intercepterp/
 To add thrust later: append index 1 in ActionConfig and one line in
 Interceptor.apply_action(). Nothing else changes.
 
-### SensorModel.observe() signature
+### SensorModel.observe_full() signature (current Simulink sensor slot)
 ```python
-def observe(
+def observe_full(
     self,
     interceptor_state: dict,
     intruder_state: dict,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, bool]:
-    # returns (obs_3dim, in_fov)
+    # returns (obs_5dim, in_fov)  -- EKF estimate + own heading
 ```
+The 3-dim observe() is kept for backward compatibility but the env now uses
+observe_full(). reset_filter() seeds the EKF in InterceptEnv.reset().
 
-### Reward
+### Reward (v4, since 2026-06-03: quadratic + EKF, no closing term)
 ```
-r_step     = -0.05 * |theta_obs|                       every step
-           + 0.015 * max(0, r_obs[t-1] - r_obs[t])    closing reward
-r_terminal = +100  if r < 5m                           (terminated, success)
-           = -100  if |theta| > 30 deg                 (terminated, FOV loss)
-           = -100  if t > 30s                          (truncated, timeout)
+r_step     = -0.003 * theta_hat^2                          every step
+           + 0.005 * max(0, -r_dot_hat)                    approach reward
+           - 0.05  * (|theta_hat| - 20deg)^2 if |theta_hat| > 20deg   FOV soft buffer
+r_terminal = +100  if r < 5m                               (terminated, success)
+           = -100  if |theta| > 30 deg                     (terminated, FOV loss)
+           = -50   if t > 30s                              (truncated, timeout)
 ```
+theta_hat, r_dot_hat are EKF outputs; r (termination) is the true range.
 
 ---
 
@@ -364,6 +374,57 @@ Append a new entry after every Claude Code session.
   any new run: measure the zero-action intercept rate at the new offset and treat
   it as the floor any learned policy must clear.
 - tests/test_env.py: unchanged; no test pins bearing_offset_max, all 20 pass.
+
+## 2026-06-03 (EKF + MLP + reward v4: architecture change)
+- Architecture change: LSTM replaced by EKF + MLP. The EKF estimates
+  theta_dot and r_dot from noisy bearing and range measurements, making
+  the observation space fully observable. This eliminates the temporal
+  credit assignment problem that caused explained_variance to stall.
+  Reward is now quadratic on bearing angle with a soft FOV buffer zone.
+- envs/sensor.py: added RelativeEKF (state [theta, theta_dot, r, r_dot],
+  constant-velocity F, measurements [theta, r], range-dependent R). SensorModel
+  now owns an EKF and exposes observe_full() (5-dim EKF obs + phi_self) and
+  reset_filter() (seeds the EKF from the spawn measurement). observe() (3-dim)
+  is unchanged for backward compatibility. observe_full() is the new Simulink
+  sensor slot. Decision: the EKF q_theta/q_r and the in-update range-noise
+  fraction are read from config (ekf block, sensor.range_noise_frac) and passed
+  through the constructors rather than hardcoded, honouring the no-hardcoding
+  rule while keeping the supplied matrices byte-identical at the default values.
+- envs/intercept_env.py: observation_space is now shape (5,) with bounds
+  [-pi,-pi,0,-500,-pi] .. [pi,pi,5000,500,pi]. step() uses observe_full();
+  reset() calls reset_filter() before the first observe_full(). prev_r_obs/
+  current_r_obs removed (closing reward gone). The true-range attribute was
+  renamed self.range -> self.current_range (matches the v4 _compute_reward
+  signature); the info "range" key is unchanged. _compute_reward now reads the
+  stored self.last_obs: quadratic bearing penalty -0.003*theta^2, approach
+  reward 0.005*max(0,-r_dot_hat), and a quadratic FOV soft-buffer penalty
+  -0.05*(|theta|-20deg)^2 outside 20 deg. Decision: the termination_reason
+  assignments (omitted by the literal patch) were retained, because eval, the
+  info dict, and the curriculum is_success flag all read them; dropping them
+  would silently break curriculum advancement (a hard rule).
+- config/defaults.yaml: new ekf block (q_theta 0.01, q_r 1.0); reward block
+  replaced (bearing_penalty 0.003, approach_reward 0.005, fov_soft_limit_deg 20,
+  fov_edge_penalty 0.05, closing_reward 0.0 disabled, success/fov_loss/timeout
+  unchanged at 100/-100/-50); lstm_hidden_size and lstm_n_layers removed from the
+  training block with the LSTM-removed comment. bearing_offset_max stays 25 deg.
+- training/train.py: RecurrentPPO/MlpLstmPolicy replaced by PPO/MlpPolicy;
+  EntropyDecayCallback removed (and deleted from callbacks.py, it was LSTM-era
+  only). gamma stays explicit and shared with VecNormalize (norm_obs still False,
+  norm_reward setup unchanged). seed retained for reproducibility.
+- eval/eval.py and viz/replay.py: switched RecurrentPPO -> PPO and dropped the
+  LSTM state threading so main stays runnable on the new policy (not in the
+  five-change list, but required by the always-runnable rule since both load and
+  roll out the trained model).
+- tests/test_env.py: all obs-shape assertions updated to (5,); reward tests
+  rewritten for the quadratic/approach/edge formula via a controlled self.last_obs;
+  closing-reward tests removed; added test_ekf_initialises, test_ekf_updates,
+  test_fov_edge_penalty, test_bearing_penalty_quadratic, and
+  test_zero_action_baseline. All 23 tests pass.
+- Validation: 23/23 tests pass; env smoke (reset + 10 steps) prints obs shape
+  (5,) and sane EKF estimates with no crash; a 1024-step PPO run trained, saved
+  vec_normalize.pkl + models, and eval loaded the PPO model and wrote
+  eval_results.json end to end. The zero-action baseline at 25 deg offset is
+  0/50 = 0.000 (well under the 0.20 floor), confirming the task is non-trivial.
 
 ---
 
