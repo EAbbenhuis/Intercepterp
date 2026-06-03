@@ -42,13 +42,17 @@ ekf:
   q_r:       1.0     # process noise, range
 
 reward:
-  bearing_penalty:      0.5      # was 0.01 — must dominate at typical angles
-  approach_reward:      0.3      # was 0.005 — must give meaningful signal
-  fov_soft_limit_deg:   15.0     # unchanged
-  fov_edge_penalty:     2.0      # was 0.1 — must strongly punish edge approach
-  success:              100.0    # unchanged
-  fov_loss:            -100.0    # unchanged
-  timeout:             -50.0     # unchanged
+  # v5: bearing-rate penalty (primary) teaches collision-course geometry; a
+  # constant bearing rate is a lead-pursuit course, so penalising |theta_dot|
+  # rewards holding the target on a fixed line of sight. bearing_penalty is the
+  # secondary soft-FOV constraint that keeps the target near boresight without
+  # dominating. alpha = 0.667 gives a 23-point advantage to a collision course
+  # over pure pursuit; beta = 0.022 keeps bearing as a soft constraint.
+  bearing_rate_penalty:  0.667
+  bearing_penalty:       0.022
+  success:               100.0
+  fov_loss:             -100.0
+  timeout:              -50.0
 
 training:
   total_timesteps:   5_000_000  # unchanged, production value

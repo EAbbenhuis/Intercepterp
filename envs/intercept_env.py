@@ -86,8 +86,12 @@ class InterceptEnv(BaseEnv):
         self.episode_timeout = float(phys["episode_timeout"])
         self.fov_half_angle = np.radians(float(phys["fov_half_angle"]))
 
+        # Reward v5 weights. _compute_reward reads them straight from the config
+        # dict; these caches are for introspection and tests. alpha weights the
+        # bearing-rate penalty (primary), beta the bearing penalty (secondary).
         rew = config["reward"]
-        self.alpha = float(rew["bearing_penalty"])
+        self.alpha = float(rew["bearing_rate_penalty"])
+        self.beta = float(rew["bearing_penalty"])
         self.reward_success = float(rew["success"])
         self.reward_fov_loss = float(rew["fov_loss"])
         self.reward_timeout = float(rew["timeout"])
@@ -289,45 +293,29 @@ class InterceptEnv(BaseEnv):
     def _compute_reward(self) -> tuple[float, bool, bool]:
         """Return (reward, terminated, truncated) for the current state.
 
-        Reward v4 (EKF + quadratic shaping). The step reward is built from the
-        EKF estimate stored in self.last_obs:
-          - a quadratic bearing penalty -w * theta^2, mild near boresight and
-            steep toward the edge (replaces the old linear penalty);
-          - an approach reward paid for estimated closing speed (max(0, -r_dot)),
-            never penalising opening, so the agent is rewarded for actually
-            reducing range rather than orbiting;
-          - a quadratic FOV soft-buffer penalty that activates only outside the
-            soft limit, pushing the policy to keep the target away from the hard
-            FOV edge before it is lost.
+        Reward v5 (bearing-rate shaping). The step reward is built from the EKF
+        estimate stored in self.last_obs and has two terms:
+          - a bearing-rate penalty -alpha * |theta_dot|, the primary term. A
+            constant line-of-sight bearing is the signature of a collision
+            (lead-pursuit) course, so penalising the estimated bearing rate
+            rewards holding the target on a fixed bearing and drives the policy
+            onto a collision course rather than a tail chase;
+          - a bearing penalty -beta * |theta|, a secondary soft-FOV constraint
+            that keeps the target near boresight without dominating the rate term.
         Priority is success, then FOV loss, then timeout: detonation always wins.
         The termination_reason assignments are retained because eval, the info
         dict, and the curriculum's is_success flag all read them.
         """
         theta = self.last_obs[0]      # EKF theta_hat
-        theta_dot = self.last_obs[1]  # EKF theta_dot_hat (unused here; available)
-        r = self.current_range        # true range for termination checks
-        r_dot_hat = self.last_obs[3]  # EKF r_dot_hat
+        theta_dot = self.last_obs[1]  # EKF theta_dot_hat
 
-        fov_soft_limit = np.deg2rad(self.config["reward"]["fov_soft_limit_deg"])
-
-        # Quadratic bearing penalty (replaces linear)
-        r_bearing = -self.config["reward"]["bearing_penalty"] * theta ** 2
-
-        # Approach reward: reward closing speed, never penalise opening
-        r_approach = self.config["reward"]["approach_reward"] * max(0.0, -r_dot_hat)
-
-        # FOV soft buffer: quadratic penalty outside the soft limit
-        abs_theta = abs(theta)
-        if abs_theta > fov_soft_limit:
-            excess = abs_theta - fov_soft_limit
-            r_edge = -self.config["reward"]["fov_edge_penalty"] * (excess ** 2)
-        else:
-            r_edge = 0.0
-
-        r_step = float(r_bearing + r_approach + r_edge)
+        r_step = float(
+            -self.config["reward"]["bearing_rate_penalty"] * abs(theta_dot)
+            - self.config["reward"]["bearing_penalty"] * abs(theta)
+        )
 
         # Terminal conditions
-        if r < self.config["physics"]["blast_radius"]:
+        if self.current_range < self.config["physics"]["blast_radius"]:
             self.termination_reason = "success"
             return r_step + self.config["reward"]["success"], True, False
 

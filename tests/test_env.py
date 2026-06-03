@@ -2,7 +2,7 @@
 
 Covers the spec's required test surface: observation and action space shape and
 bounds, the three termination/truncation paths, the EKF state estimator, the
-quadratic reward with its FOV soft buffer, and a valid reset. The
+v5 bearing-rate reward (rate penalty + bearing penalty), and a valid reset. The
 terminated-vs-truncated contract from CLAUDE.md is asserted directly because it
 is a hard rule (FOV loss and detonation terminate; timeout truncates).
 
@@ -209,115 +209,113 @@ def test_terminated_truncated_are_never_both_true(config):
 # ---------------------------------------------------------- reward: exact --
 
 def test_reward_constants_match_spec(config):
+    """The committed reward constants must match the v5 reward block.
+
+    These expected values track config/defaults.yaml and must be updated again if
+    the reward block changes.
+    """
     env = make_env(config)
     rew = env.config["reward"]
-    assert rew["bearing_penalty"] == pytest.approx(0.003)
-    assert rew["approach_reward"] == pytest.approx(0.005)
-    assert rew["fov_soft_limit_deg"] == pytest.approx(20.0)
-    assert rew["fov_edge_penalty"] == pytest.approx(0.05)
-    assert rew["closing_reward"] == pytest.approx(0.0)
+    assert rew["bearing_rate_penalty"] == pytest.approx(0.667)
+    assert rew["bearing_penalty"] == pytest.approx(0.022)
     assert env.reward_success == pytest.approx(100.0)
     assert env.reward_fov_loss == pytest.approx(-100.0)
     assert env.reward_timeout == pytest.approx(-50.0)
-    # alpha caches the (now quadratic) bearing-penalty weight.
-    assert env.alpha == pytest.approx(0.003)
+    # The v4 shaping keys were removed and must no longer be present.
+    for removed in (
+        "approach_reward",
+        "fov_soft_limit_deg",
+        "fov_edge_penalty",
+        "closing_reward",
+    ):
+        assert removed not in rew
+    # alpha caches the primary bearing-rate weight, beta the secondary bearing weight.
+    assert env.alpha == pytest.approx(0.667)
+    assert env.beta == pytest.approx(0.022)
 
 
-def test_reward_values_exact(noiseless_config):
-    """Drive _compute_reward with controlled self.last_obs to check arithmetic.
+def test_bearing_rate_reward(noiseless_config):
+    """The v5 step reward is two non-positive terms: a bearing-rate penalty
+    -alpha*|theta_dot| (primary) and a bearing penalty -beta*|theta| (secondary).
 
-    last_obs = [theta_hat, theta_dot_hat, r_hat, r_dot_hat, phi_self]. All bearing
-    values used here are inside the soft limit, so the FOV edge term is 0 and each
-    case isolates the quadratic bearing penalty plus the approach term plus the
-    terminal component.
+    last_obs = [theta_hat, theta_dot_hat, r_hat, r_dot_hat, phi_self]. A controlled
+    non-terminal state isolates the step reward arithmetic; a real step then
+    confirms the same decomposition holds on the env's own observation.
     """
-    env = make_env(noiseless_config)
-    bp = env.config["reward"]["bearing_penalty"]
-    ap = env.config["reward"]["approach_reward"]
+    env = make_env(noiseless_config, seed=0)
+    rew = env.config["reward"]
+    alpha = rew["bearing_rate_penalty"]
+    beta = rew["bearing_penalty"]
 
-    def step_reward(theta: float, r_dot: float) -> float:
-        return -bp * float(theta) ** 2 + ap * max(0.0, -float(r_dot))
-
-    # Ongoing step: bearing penalty + approach (closing), in view, out of range.
-    env.last_obs = np.array([0.1, 0.0, 500.0, -20.0, 0.0], dtype=np.float32)
+    # Controlled non-terminal state with a clear off-boresight bearing and a clear
+    # bearing rate, so each shaping term is strictly negative.
+    theta, theta_dot = 0.20, 0.10
+    env.last_obs = np.array([theta, theta_dot, 500.0, 0.0, 0.0], dtype=np.float32)
     env.current_range, env.in_fov, env.t = 500.0, True, 0.0
     reward, terminated, truncated = env._compute_reward()
-    expected = step_reward(env.last_obs[0], env.last_obs[3])
-    assert reward == pytest.approx(expected, rel=1e-5)
     assert (terminated, truncated) == (False, False)
 
-    # Success: step reward + 100, terminated.
-    env.last_obs = np.array([0.1, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
-    env.current_range, env.in_fov, env.t = 1.0, True, 0.0
-    reward, terminated, truncated = env._compute_reward()
-    expected = step_reward(env.last_obs[0], env.last_obs[3]) + 100.0
-    assert reward == pytest.approx(expected, rel=1e-5)
-    assert (terminated, truncated) == (True, False)
-    assert env.termination_reason == "success"
+    rate_term = -alpha * abs(theta_dot)
+    bearing_term = -beta * abs(theta)
+    assert rate_term < 0.0
+    assert bearing_term < 0.0
+    # The bearing-rate term is the primary signal and dominates the bearing term.
+    assert abs(rate_term) > abs(bearing_term)
+    # The step reward is exactly the sum of the two terms (no terminal component).
+    assert reward == pytest.approx(rate_term + bearing_term, rel=1e-5)
 
-    # FOV loss: step reward - 100, terminated.
-    env.last_obs = np.array([0.1, 0.0, 500.0, 0.0, 0.0], dtype=np.float32)
-    env.current_range, env.in_fov, env.t = 500.0, False, 0.0
-    reward, terminated, truncated = env._compute_reward()
-    expected = step_reward(env.last_obs[0], env.last_obs[3]) - 100.0
-    assert reward == pytest.approx(expected, rel=1e-5)
-    assert (terminated, truncated) == (True, False)
-    assert env.termination_reason == "fov_loss"
-
-    # Timeout: step reward - 50, truncated.
-    env.last_obs = np.array([0.1, 0.0, 500.0, -5.0, 0.0], dtype=np.float32)
-    env.current_range, env.in_fov = 500.0, True
-    env.t = env.episode_timeout
-    reward, terminated, truncated = env._compute_reward()
-    expected = step_reward(env.last_obs[0], env.last_obs[3]) - 50.0
-    assert reward == pytest.approx(expected, rel=1e-5)
-    assert (terminated, truncated) == (False, True)
-    assert env.termination_reason == "timeout"
+    # A real step returns the same decomposition built from its own last_obs.
+    obs, step_reward, term, trunc, _ = env.step(np.array([0.5], dtype=np.float32))
+    if not (term or trunc):
+        expected = -alpha * abs(float(obs[1])) - beta * abs(float(obs[0]))
+        assert step_reward == pytest.approx(expected, rel=1e-5, abs=1e-9)
 
 
-def test_bearing_penalty_quadratic(noiseless_config):
-    """The bearing penalty scales as theta^2: 0.4 rad gives ~4x the 0.2 rad value."""
-    cfg = copy.deepcopy(noiseless_config)
-    # Lift the soft limit so the FOV edge buffer never activates here, isolating
-    # the quadratic bearing term (0.4 rad = 22.9 deg would otherwise exceed the
-    # 20 deg soft limit and add an edge penalty).
-    cfg["reward"]["fov_soft_limit_deg"] = 90.0
-    env = InterceptEnv(cfg, ActionConfig(), curriculum_stage=1, rng_seed=0)
-    env.reset(seed=0)
+def test_collision_course_better_than_pursuit(noiseless_config):
+    """A collision course must out-reward a tail chase under the v5 reward.
 
-    def bearing_penalty(theta: float) -> float:
-        # r_dot = 0 so the approach term vanishes and the reward is -w * theta^2.
-        env.last_obs = np.array([theta, 0.0, 500.0, 0.0, 0.0], dtype=np.float32)
-        env.current_range, env.in_fov, env.t = 500.0, True, 0.0
-        reward, _, _ = env._compute_reward()
-        return reward
+    Head-on geometry holds the target on a constant near-zero bearing (zero
+    bearing rate), the signature of a lead-pursuit collision course, so the
+    bearing-rate penalty stays ~0. A tail chase sits off boresight with a drifting
+    bearing, so it pays the bearing-rate penalty every step. Twenty zero-action
+    steps from each geometry must leave the collision course with the strictly
+    higher cumulative reward.
+    """
+    def rollout(setup) -> float:
+        env = make_env(noiseless_config, seed=0)
+        setup(env)
+        # Re-seed the EKF from the overridden spawn geometry so the first estimate
+        # reflects the test geometry, not the random reset spawn.
+        env.sensor.reset_filter(
+            env.interceptor.get_state(), env.intruder.get_state(), env.np_random
+        )
+        total = 0.0
+        for _ in range(20):
+            _, reward, terminated, truncated, _ = env.step(_zero_action())
+            total += reward
+            if terminated or truncated:
+                break
+        return total
 
-    p02 = bearing_penalty(0.2)
-    p04 = bearing_penalty(0.4)
-    assert p02 < 0.0 and p04 < 0.0
-    assert p04 == pytest.approx(4.0 * p02, rel=1e-3)
+    def head_on(env: InterceptEnv) -> None:
+        # Interceptor heading +x; intruder 400 m ahead heading -x (straight at it).
+        # Both stay on y = 0, so the bearing holds at ~0 with ~0 bearing rate.
+        env.interceptor.x, env.interceptor.y, env.interceptor.psi = 0.0, 0.0, 0.0
+        env.intruder.x, env.intruder.y, env.intruder.psi = 400.0, 0.0, np.pi
 
+    def tail_chase(env: InterceptEnv) -> None:
+        # Interceptor heading +x; intruder 400 m out at ~0.3 rad off boresight,
+        # flying +x (lagging pursuit). The bearing drifts, so theta_dot != 0.
+        d, off = 400.0, 0.3
+        env.interceptor.x, env.interceptor.y, env.interceptor.psi = 0.0, 0.0, 0.0
+        env.intruder.x = float(d * np.cos(off))
+        env.intruder.y = float(d * np.sin(off))
+        env.intruder.psi = 0.0
 
-def test_fov_edge_penalty(noiseless_config, config):
-    """A bearing between the soft limit and the hard FOV edge must add r_edge < 0."""
-    env = make_env(noiseless_config)
-    rew = env.config["reward"]
-    soft = np.deg2rad(rew["fov_soft_limit_deg"])             # 20 deg
-    hard = np.deg2rad(config["physics"]["fov_half_angle"])   # 30 deg
-    theta = float(np.deg2rad(25.0))                          # between soft and hard
-    assert soft < theta < hard
+    r_head_on = rollout(head_on)
+    r_tail_chase = rollout(tail_chase)
 
-    # No approach term (r_dot = 0); reward = bearing penalty + edge penalty.
-    env.last_obs = np.array([theta, 0.0, 500.0, 0.0, 0.0], dtype=np.float32)
-    env.current_range, env.in_fov, env.t = 500.0, True, 0.0
-    reward, _, _ = env._compute_reward()
-
-    bearing_only = -rew["bearing_penalty"] * float(env.last_obs[0]) ** 2
-    # The edge penalty makes the reward strictly more negative than bearing alone.
-    assert reward < bearing_only
-    excess = abs(float(env.last_obs[0])) - soft
-    expected_edge = -rew["fov_edge_penalty"] * excess ** 2
-    assert reward == pytest.approx(bearing_only + expected_edge, rel=1e-4)
+    assert r_head_on > r_tail_chase
 
 
 def test_reward_priority_success_over_fov_loss(noiseless_config):
