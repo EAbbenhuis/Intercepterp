@@ -70,7 +70,7 @@ curriculum:
 
 tuning:
   enabled:            false     # never true in production
-  total_timesteps:    300_000   # fast diagnostic run
+  total_timesteps:    1_000_000   # fast diagnostic run
   range_mean:         300.0     # override init.range_mean when enabled
   range_std:          30.0      # override init.range_std when enabled
   freeze_curriculum:  true      # lock to stage 1 only when enabled
